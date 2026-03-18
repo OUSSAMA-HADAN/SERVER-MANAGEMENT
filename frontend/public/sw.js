@@ -12,9 +12,12 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  if (e.request.url.includes('/api/')) return; // never cache API
+  const url = new URL(e.request.url);
+  // Only handle same-origin requests, skip API calls and external URLs
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
+    fetch(e.request).catch(() => caches.match(e.request).then((r) => r || Response.error()))
   );
 });
 
