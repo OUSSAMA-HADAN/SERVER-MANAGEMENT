@@ -1,0 +1,12 @@
+{
+  "name": "ServerCtrl — SRV0HP",
+  "short_name": "ServerCtrl",
+  "description": "Oussama's homelab server manager",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0b",
+  "theme_color": "#0a0a0b",
+  "icons": [
+    { "src": "/skull.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

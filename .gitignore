@@ -1,1 +1,25 @@
+# Dependencies
 node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backend data (DB + generated keys)
+backend/data/
+
+# Frontend build output
+frontend/dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
