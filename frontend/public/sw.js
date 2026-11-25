@@ -1,4 +1,4 @@
-const CACHE_NAME = 'serverctrl-v1';
+const CACHE_NAME = 'serverctrl-v5';
 const STATIC_ASSETS = ['/', '/index.html'];
 
 self.addEventListener('install', (e) => {

@@ -10,7 +10,9 @@ export default defineConfig({
     }
   },
   build: {
-    outDir: 'dist'
+    outDir: 'dist',
+    manifest: true,
+    sourcemap: false
   }
 });
 

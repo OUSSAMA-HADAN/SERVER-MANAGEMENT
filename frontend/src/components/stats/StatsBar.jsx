@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch } from '../../App.jsx';
+import { apiFetch, SERVER_NAME } from '../../App.jsx';
 
 function fmt(bytes) {
   if (bytes >= 1e12) return (bytes / 1e12).toFixed(1) + 'T';
@@ -82,12 +82,15 @@ export default function StatsBar() {
       {/* Hostname */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
         <div className="pulse-dot" />
-        <span style={{ color: 'var(--green)', fontSize: '11px', fontWeight: 700, fontFamily: 'Syne' }}>SRV0HP</span>
+        <span style={{ color: 'var(--green)', fontSize: '11px', fontWeight: 700, fontFamily: 'Syne' }}>{SERVER_NAME}</span>
       </div>
 
       <div className="vdivider" />
 
       <StatItem label="CPU" value={`${cpuPct.toFixed(1)}%`} pct={cpuPct} warn={cpuPct > 80} />
+      {stats.temp !== undefined && stats.temp > 0 && (
+        <StatItem label="TEMP" value={`${stats.temp}°C`} pct={stats.temp} warn={stats.temp > 75} />
+      )}
       <StatItem label="RAM" value={`${fmt(stats.memUsed)}/${fmt(stats.memTotal)}`} pct={memPct} warn={memPct > 85} />
 
       {visibleDisks.length > 0 && (

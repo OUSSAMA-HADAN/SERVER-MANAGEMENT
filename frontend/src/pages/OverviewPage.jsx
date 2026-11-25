@@ -56,18 +56,27 @@ export default function OverviewPage() {
   const [services, setServices] = useState([]);
   const [containers, setContainers] = useState([]);
   const [links, setLinks] = useState({});
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      apiFetch('/api/services').then(r => r.json()),
-      apiFetch('/api/docker/containers').then(r => r.json()),
-      apiFetch('/api/container-links').then(r => r.json()),
-    ]).then(([s, c, l]) => {
-      setServices(Array.isArray(s) ? s : []);
-      setContainers(Array.isArray(c) ? c : []);
-      setLinks(l || {});
-    }).catch(() => {}).finally(() => setLoading(false));
+    const fetchData = () => {
+      Promise.all([
+        apiFetch('/api/services').then(r => r.json()),
+        apiFetch('/api/docker/containers').then(r => r.json()),
+        apiFetch('/api/container-links').then(r => r.json()),
+        apiFetch('/api/stats').then(r => r.json()),
+      ]).then(([s, c, l, st]) => {
+        setServices(Array.isArray(s) ? s : []);
+        setContainers(Array.isArray(c) ? c : []);
+        setLinks(l || {});
+        setStats(st && !st.error ? st : null);
+      }).catch(() => {}).finally(() => setLoading(false));
+    };
+
+    fetchData();
+    const iv = setInterval(fetchData, 5000);
+    return () => clearInterval(iv);
   }, []);
 
   const activeServices = services.filter(s => s.status === 'active').length;
@@ -86,7 +95,15 @@ export default function OverviewPage() {
       </div>
 
       {/* Quick stats grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '24px' }}>
+        <QuickCard
+          icon="🌡"
+          title="CPU Temp"
+          linkTo="/"
+          value={stats?.temp ? `${stats.temp}°C` : (loading ? '—' : 'N/A')}
+          sub={stats?.temp ? (stats.temp > 75 ? 'high temp' : 'optimal') : ''}
+          color={stats?.temp > 75 ? 'var(--red)' : 'var(--green)'}
+        />
         <QuickCard icon="⚙"  title="Services"   linkTo="/services"  value={loading ? '—' : `${activeServices}/${services.length}`}   sub="active" />
         <QuickCard icon="◈"  title="Containers" linkTo="/docker"    value={loading ? '—' : `${runningContainers}/${containers.length}`} sub="running" />
         <QuickCard icon="▦"  title="Processes"  linkTo="/processes" value="top 40"  sub="by CPU"    color="#00b8e8" />

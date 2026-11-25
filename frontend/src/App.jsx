@@ -1,17 +1,22 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, lazy, Suspense } from 'react';
 import { ConfirmProvider } from './components/ConfirmModal.jsx';
 import LoginPage from './pages/LoginPage.jsx';
-import DashboardLayout from './components/layout/DashboardLayout.jsx';
-import OverviewPage from './pages/OverviewPage.jsx';
-import ServicesPage from './pages/ServicesPage.jsx';
-import DockerPage from './pages/DockerPage.jsx';
-import ProcessesPage from './pages/ProcessesPage.jsx';
-import TerminalPage from './pages/TerminalPage.jsx';
+
+// Loaded only after login (server refuses this chunk to anonymous visitors).
+const Dashboard = lazy(() => import('./Dashboard.jsx'));
+
+const Spinner = () => (
+  <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh', background:'#0a0a0b' }}>
+    <div className="spinner" />
+  </div>
+);
 
 export const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 export const API = '';
+export const SERVER_NAME = import.meta.env.VITE_SERVER_NAME || 'server';
+export const APP_TITLE = import.meta.env.VITE_APP_TITLE || 'ServerCtrl';
 export function apiFetch(path, opts = {}) {
   return fetch(`${API}${path}`, { credentials: 'include', ...opts });
 }
@@ -51,14 +56,7 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-            <Route path="/" element={<Protected><DashboardLayout /></Protected>}>
-              <Route index element={<OverviewPage />} />
-              <Route path="services" element={<ServicesPage />} />
-              <Route path="docker" element={<DockerPage />} />
-              <Route path="processes" element={<ProcessesPage />} />
-              <Route path="terminal" element={<TerminalPage />} />
-            </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="/*" element={<Protected><Suspense fallback={<Spinner />}><Dashboard /></Suspense></Protected>} />
           </Routes>
         </BrowserRouter>
       </div>

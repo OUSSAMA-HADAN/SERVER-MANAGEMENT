@@ -23,3 +23,11 @@ Thumbs.db
 # Editor
 .vscode/settings.json
 .idea/
+
+# graphify (generated, rebuild with: graphify update .)
+graphify-out/
+
+# Local/private (not for the public repo)
+PROJECT.md
+backend/container-links.json
+.claude/settings.local.json

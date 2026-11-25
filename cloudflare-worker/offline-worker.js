@@ -1,16 +1,20 @@
 /**
- * Cloudflare Worker — Offline fallback for home-lab.indevs.in
+ * Cloudflare Worker — Offline fallback page for your ServerCtrl domain
  *
  * Deploy at: https://dash.cloudflare.com → Workers & Pages → Create Worker
- * Then add a Route: home-lab.indevs.in/* → this worker
+ * Then add a Route: your-domain.com/* → this worker
+ * and set SITE_DOMAIN below.
  */
+
+const SITE_DOMAIN = 'your-domain.com';
+const SERVER_NAME = 'server';
 
 const OFFLINE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SRV0HP — Offline</title>
+  <title>${SERVER_NAME} — Offline</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -234,7 +238,7 @@ const OFFLINE_HTML = `<!DOCTYPE html>
 
     <div class="header">
       <div class="status-dot"></div>
-      <span class="hostname">SRV0HP</span>
+      <span class="hostname">${SERVER_NAME}</span>
       <span class="timestamp" id="ts"></span>
     </div>
 
@@ -246,7 +250,7 @@ const OFFLINE_HTML = `<!DOCTYPE html>
     </p>
 
     <div class="terminal">
-      <div><span class="prompt">$ </span><span class="cmd">ping srv0hp.local</span></div>
+      <div><span class="prompt">$ </span><span class="cmd">ping ${SERVER_NAME}.local</span></div>
       <div><span class="out">Request timeout for icmp_seq 0</span></div>
       <div><span class="out">Request timeout for icmp_seq 1</span></div>
       <div><span class="prompt">$ </span><span class="cursor"></span></div>
@@ -260,7 +264,7 @@ const OFFLINE_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="footer">
-      <span class="footer-brand">home-lab.indevs.in</span>
+      <span class="footer-brand">${SITE_DOMAIN}</span>
       <button class="retry-btn" onclick="location.reload()">&#8635; Retry</button>
     </div>
   </div>

@@ -2,15 +2,53 @@ const WebSocket = require('ws');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 
+const { checkAccess, originAllowed, clientIp, clientCountry } = require('../middleware/security');
+
 const execAsync = promisify(exec);
 
-function createTerminalServer(server, sessionMiddleware) {
-  const wss = new WebSocket.Server({ noServer: true });
+// Never hand the app's secrets to the shell.
+const SECRET_ENV = /SECRET|PASSWORD|TOKEN|KEY|VAPID|HASH|AUD/i;
+function shellEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!SECRET_ENV.test(k)) env[k] = v;
+  return env;
+}
 
-  server.on('upgrade', (req, socket, head) => {
+const MAX_TERMINALS_PER_USER = 3;
+const openTerminals = new Map(); // userId -> count
+
+function reject(socket, code, msg) {
+  socket.write(`HTTP/1.1 ${code} ${msg}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+function createTerminalServer(server, sessionMiddleware) {
+  const wss = new WebSocket.Server({ noServer: true, maxPayload: 64 * 1024 });
+
+  server.on('upgrade', async (req, socket, head) => {
+    socket.on('error', () => {});
+    const ip = clientIp(req);
+    // Browsers always send Origin on WebSocket; must match our host (blocks cross-site WS hijacking).
+    if (!originAllowed(req, { requireOrigin: true })) {
+      console.warn(`[terminal] rejected bad origin "${req.headers.origin}" ip=${ip}`);
+      return reject(socket, 403, 'Forbidden');
+    }
+    if (!(await checkAccess(req))) return reject(socket, 403, 'Forbidden');
+
     sessionMiddleware(req, {}, () => {
-      if (!req.session?.userId) { socket.destroy(); return; }
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+      const userId = req.session?.userId;
+      if (!userId) return reject(socket, 401, 'Unauthorized');
+      if ((openTerminals.get(userId) || 0) >= MAX_TERMINALS_PER_USER) return reject(socket, 429, 'Too Many Requests');
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        openTerminals.set(userId, (openTerminals.get(userId) || 0) + 1);
+        console.log(`[terminal] opened by user="${req.session.username}" ip=${ip} country=${clientCountry(req)}`);
+        ws.on('close', () => {
+          const n = (openTerminals.get(userId) || 1) - 1;
+          if (n <= 0) openTerminals.delete(userId); else openTerminals.set(userId, n);
+          console.log(`[terminal] closed user="${req.session.username}" ip=${ip}`);
+        });
+        wss.emit('connection', ws, req);
+      });
     });
   });
 
@@ -23,7 +61,7 @@ function createTerminalServer(server, sessionMiddleware) {
         cols: 80,
         rows: 24,
         cwd: process.env.HOME || '/home/srv',
-        env: process.env,
+        env: shellEnv(),
       });
 
       pty.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'output', data })); });
@@ -47,7 +85,7 @@ function createTerminalServer(server, sessionMiddleware) {
             const cmd = parsed.data.trim();
             if (!cmd) return;
             try {
-              const { stdout, stderr } = await execAsync(cmd, { timeout: 10000 });
+              const { stdout, stderr } = await execAsync(cmd, { timeout: 10000, env: shellEnv() });
               ws.send(JSON.stringify({ type: 'output', data: (stdout || stderr) + '\r\n$ ' }));
             } catch (err) {
               ws.send(JSON.stringify({ type: 'output', data: (err.stderr || err.message) + '\r\n$ ' }));

@@ -1,0 +1,10 @@
+# Never index secrets, data or generated files
+.env
+.env.*
+!.env.example
+backend/data/
+*.db
+*.sqlite
+node_modules/
+frontend/dist/
+package-lock.json

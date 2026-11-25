@@ -67,7 +67,11 @@ function ContainersTab({ onToast }) {
     } catch {} finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    fetchData();
+    const iv = setInterval(fetchData, 10000);
+    return () => clearInterval(iv);
+  }, [fetchData]);
 
   const doAction = async (id, name, action) => {
     const key = `${id}-${action}`;
@@ -179,7 +183,11 @@ function ImagesTab({ onToast }) {
     } catch {} finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    fetchData();
+    const iv = setInterval(fetchData, 10000);
+    return () => clearInterval(iv);
+  }, [fetchData]);
 
   const remove = async (id, label) => {
     if (!await confirm(`Remove image "${label}"?`, { detail: 'This will delete the image from disk.', danger: true })) return;

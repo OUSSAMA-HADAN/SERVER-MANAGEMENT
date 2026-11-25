@@ -70,7 +70,11 @@ export default function ServicesPage() {
     } catch {} finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchServices(); }, [fetchServices]);
+  useEffect(() => {
+    fetchServices();
+    const iv = setInterval(fetchServices, 10000);
+    return () => clearInterval(iv);
+  }, [fetchServices]);
 
   const handleAction = async (name, action) => {
     setActioning(`${name}-${action}`);

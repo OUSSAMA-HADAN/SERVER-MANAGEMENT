@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth, apiFetch } from '../App.jsx';
+import { useAuth, apiFetch, APP_TITLE } from '../App.jsx';
 
 function BloodRain() {
   const drops = Array.from({ length: 35 }, (_, i) => ({
@@ -34,19 +34,70 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [siteKey, setSiteKey] = useState(null);
+  const [step, setStep] = useState('password'); // 'password' | 'totp'
+  const [code, setCode] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const widgetRef = useRef(null);
+  const widgetId = useRef(null);
+
+  // Load Cloudflare Turnstile if the server has it configured.
+  useEffect(() => {
+    apiFetch('/api/auth/config').then(r => r.ok ? r.json() : {}).then(c => {
+      if (c.turnstileSiteKey) setSiteKey(c.turnstileSiteKey);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!siteKey) return;
+    const render = () => {
+      if (!window.turnstile || !widgetRef.current || widgetId.current !== null) return;
+      widgetId.current = window.turnstile.render(widgetRef.current, {
+        sitekey: siteKey,
+        theme: 'dark',
+        callback: (t) => setTurnstileToken(t),
+        'expired-callback': () => setTurnstileToken(''),
+        'error-callback': () => setTurnstileToken(''),
+      });
+    };
+    if (window.turnstile) { render(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    s.async = true;
+    s.onload = render;
+    document.head.appendChild(s);
+  }, [siteKey]);
+
+  const resetTurnstile = () => {
+    if (window.turnstile && widgetId.current !== null) window.turnstile.reset(widgetId.current);
+    setTurnstileToken('');
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const res = await apiFetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error || 'Authentication failed'); return; }
+      const res = step === 'password'
+        ? await apiFetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password, turnstileToken }),
+          })
+        : await apiFetch('/api/auth/totp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+          });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || 'Authentication failed');
+        setCode('');
+        if (step === 'password') resetTurnstile();
+        if (data.restart) { setStep('password'); setPassword(''); resetTurnstile(); }
+        return;
+      }
+      if (data.totpRequired) { setStep('totp'); setPassword(''); return; }
       login(data);
       navigate('/');
     } catch {
@@ -109,7 +160,7 @@ export default function LoginPage() {
             textShadow: '0 0 30px rgba(180,0,0,0.55), 0 0 60px rgba(120,0,0,0.25)',
             letterSpacing: '0.04em',
           }}>
-            Oussama&apos;s Homelab
+            {APP_TITLE}
           </h1>
           <p style={{ color: '#3a2030', fontSize: '10px', letterSpacing: '0.25em', margin: 0, textTransform: 'uppercase' }}>
             ░ authenticate to proceed ░
@@ -118,6 +169,7 @@ export default function LoginPage() {
 
         {/* Form */}
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          {step === 'password' && (<>
           <div>
             <label style={{ display: 'block', fontSize: '9px', color: '#5a3040', letterSpacing: '0.2em', marginBottom: '6px', textTransform: 'uppercase' }}>
               ▸ Identifier
@@ -171,6 +223,43 @@ export default function LoginPage() {
               onBlur={e => e.target.style.borderColor = 'rgba(100,0,0,0.4)'}
             />
           </div>
+          </>)}
+
+          {step === 'totp' && (
+            <div>
+              <label style={{ display: 'block', fontSize: '9px', color: '#5a3040', letterSpacing: '0.2em', marginBottom: '6px', textTransform: 'uppercase' }}>
+                ▸ Authenticator code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9 ]*"
+                maxLength={7}
+                autoFocus
+                value={code}
+                onChange={e => setCode(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="000000"
+                required
+                autoComplete="one-time-code"
+                style={{
+                  width: '100%',
+                  background: 'rgba(0,0,0,0.7)',
+                  border: '1px solid rgba(100,0,0,0.4)',
+                  borderBottom: '1px solid rgba(150,0,0,0.55)',
+                  color: '#cc8888',
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontSize: '20px', letterSpacing: '0.4em', textAlign: 'center', padding: '10px 12px',
+                  outline: 'none', borderRadius: '2px',
+                }}
+              />
+              <button type="button" onClick={() => { setStep('password'); setCode(''); setError(''); resetTurnstile(); }}
+                style={{ marginTop: '8px', background: 'none', border: 'none', color: '#5a3040', fontSize: '10px', cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>
+                ← back
+              </button>
+            </div>
+          )}
+
+          {siteKey && <div ref={widgetRef} style={{ display: step === 'password' ? 'flex' : 'none', justifyContent: 'center' }} />}
 
           {error && (
             <div style={{
@@ -186,7 +275,7 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || (step === 'password' && siteKey && !turnstileToken) || (step === 'totp' && code.length !== 6)}
             style={{
               marginTop: '6px', width: '100%', padding: '12px',
               background: loading ? 'rgba(80,0,0,0.3)' : 'rgba(100,0,0,0.22)',
@@ -199,14 +288,14 @@ export default function LoginPage() {
             onMouseEnter={e => { if (!loading) { e.target.style.background = 'rgba(120,0,0,0.38)'; e.target.style.color = '#ee2020'; } }}
             onMouseLeave={e => { e.target.style.background = 'rgba(100,0,0,0.22)'; e.target.style.color = '#bb0000'; }}
           >
-            {loading ? '▒▒▒ verifying ▒▒▒' : '▸ enter the system'}
+            {loading ? '▒▒▒ verifying ▒▒▒' : step === 'totp' ? '▸ verify code' : '▸ enter the system'}
           </button>
         </form>
 
         {/* Footer */}
         <div style={{ marginTop: '22px', paddingTop: '14px', borderTop: '1px solid rgba(60,0,0,0.25)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>SRV0HP</span>
-          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>100.110.63.122</span>
+          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>restricted</span>
+          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>secured</span>
         </div>
       </div>
     </div>

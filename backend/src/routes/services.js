@@ -3,6 +3,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const { requireAuth } = require('../middleware/auth');
 const { sendToAll } = require('../services/notifications');
+const SERVER_NAME = process.env.SERVER_NAME || 'server';
 
 const execAsync = promisify(exec);
 
@@ -38,7 +39,7 @@ router.post('/:name/:action', requireAuth, async (req, res) => {
     // Notify if service failed to reach expected state
     const expectedActive = action === 'start';
     if (expectedActive && status !== 'active') {
-      sendToAll('⚙️ Service Failed', `${name} failed to start on SRV0HP`, 'service-fail').catch(() => {});
+      sendToAll('⚙️ Service Failed', `${name} failed to start on ${SERVER_NAME}`, 'service-fail').catch(() => {});
     }
     res.json({ ok: true, status });
   } catch (e) {

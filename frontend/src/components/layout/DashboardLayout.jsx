@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { useAuth } from '../../App.jsx';
+import { useAuth, SERVER_NAME } from '../../App.jsx';
 import StatsBar from '../stats/StatsBar.jsx';
 import NotificationBell from '../NotificationBell.jsx';
 
@@ -106,7 +106,7 @@ export default function DashboardLayout() {
                   ServerCtrl
                 </div>
                 <div style={{ fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.12em', marginTop: '1px' }}>
-                  SRV0HP
+                  {SERVER_NAME}
                 </div>
               </div>
             </div>

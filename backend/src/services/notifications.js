@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { exec } = require('child_process');
 const { promisify } = require('util');
+const SERVER_NAME = process.env.SERVER_NAME || 'server';
 
 const execAsync = promisify(exec);
 
@@ -70,14 +71,14 @@ async function checkStats() {
 
     if (cpu > 85 && !cpuAlerted) {
       cpuAlerted = true;
-      await sendToAll('⚠️ High CPU', `CPU at ${cpu.toFixed(1)}% on SRV0HP`, 'cpu-alert');
+      await sendToAll('⚠️ High CPU', `CPU at ${cpu.toFixed(1)}% on ${SERVER_NAME}`, 'cpu-alert');
     } else if (cpu < 70) {
       cpuAlerted = false;
     }
 
     if (ram > 90 && !ramAlerted) {
       ramAlerted = true;
-      await sendToAll('⚠️ High RAM', `RAM at ${ram.toFixed(1)}% on SRV0HP`, 'ram-alert');
+      await sendToAll('⚠️ High RAM', `RAM at ${ram.toFixed(1)}% on ${SERVER_NAME}`, 'ram-alert');
     } else if (ram < 80) {
       ramAlerted = false;
     }
@@ -94,7 +95,7 @@ async function checkContainers() {
     for (const c of containers) {
       const prev = containerStates.get(c.id);
       if (prev === 'running' && c.state !== 'running') {
-        await sendToAll('🐳 Container Crashed', `${c.name} is now ${c.state} on SRV0HP`, 'container-crash');
+        await sendToAll('🐳 Container Crashed', `${c.name} is now ${c.state} on ${SERVER_NAME}`, 'container-crash');
       }
       containerStates.set(c.id, c.state);
     }
