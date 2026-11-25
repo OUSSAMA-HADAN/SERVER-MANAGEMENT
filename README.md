@@ -1,7 +1,7 @@
 # ServerCtrl
 
 A self-hosted web panel to monitor and control a Linux server remotely, from desktop or mobile.
-Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudflare.
+Accessible dark/light interface, installable as a PWA, built to sit safely behind Cloudflare (Tunnel + Access) with Tailscale as a backup path.
 
 ![Version](https://img.shields.io/badge/version-2.1.0-00e8a2?style=flat-square&labelColor=0a0a0a)
 ![Stack](https://img.shields.io/badge/stack-Node.js_+_React-00e8a2?style=flat-square&labelColor=0a0a0a)
@@ -15,14 +15,15 @@ Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudf
 
 ## Features
 
-- **System stats** — live CPU, RAM, disk, uptime and temperature
+- **System stats** — live CPU (with history), load, RAM and swap, every disk, network throughput, uptime and CPU temperature, read straight from `/proc` and `/sys`
 - **Docker** — start / stop / restart / remove containers, view logs, manage images, optional per-container links
 - **Services** — control an allow-list of systemd services (configurable with `SERVICES`)
-- **Processes** — browse and kill processes
+- **Processes** — current CPU per process (like `top`), sortable and filterable; end with SIGTERM or force-kill
 - **Web terminal** — real shells over WebSocket (xterm.js + node-pty): tabs, auto-reconnect, sessions that survive dropped connections and reloads, search, copy/paste, on-screen keys for phones, screen-reader mode
 - **Push notifications** — server online/restarting, high CPU/RAM, container crashes, failed services, **new logins and lockouts**
 - **PWA** — installable on mobile; optional Cloudflare Worker offline page
-- **Security built in** — 2FA (TOTP), brute-force lockout, rate limiting, Cloudflare Turnstile, optional Cloudflare Access, hidden API surface
+- **Security built in** — 2FA (TOTP), brute-force lockout, rate limiting, Cloudflare Turnstile, Cloudflare Access token verification, per-address listeners, hidden API surface
+- **Accessible** — WCAG AA contrast, full keyboard use, screen-reader labels and live announcements, reduced motion, automatic light theme, mobile layout
 
 ---
 
@@ -57,16 +58,19 @@ Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudf
 │       │   ├── security.js        # Headers, rate limits, lockout, Turnstile, Cloudflare Access
 │       │   └── stealth.js         # Hides protected API + dashboard code from anonymous users
 │       ├── models/                # User, PushSubscription
-│       ├── routes/                # auth, docker, services, processes, stats, system, push
-│       ├── services/              # metrics (/proc), procs, run (execFile), notifications, totp
+│       ├── routes/                # auth, docker, services, processes, stats, system, push, terminal, containerLinks
+│       ├── services/              # metrics (/proc), procs (/proc), run (execFile), notifications, totp
 │       └── websocket/terminal.js  # Web terminal (PTY sessions, reattach, heartbeat)
 ├── frontend/
 │   ├── .env.example
-│   ├── public/                    # manifest, service worker
+│   ├── public/                    # manifest, service worker, icon
 │   └── src/
-│       ├── App.jsx                # Auth context, routing (login bundle)
+│       ├── App.jsx                # Providers + routing (login bundle)
 │       ├── Dashboard.jsx          # Lazy-loaded dashboard (served only after login)
-│       ├── pages/ components/
+│       ├── styles.css             # Design system: tokens, components, themes
+│       ├── lib/                   # api, auth, metrics, polling, formatting, terminal session
+│       ├── components/            # layout, icons, dialogs, toasts, UI primitives
+│       └── pages/                 # Login, Overview, Services, Docker, Processes, Terminal
 ├── cloudflare-worker/offline-worker.js
 └── deploy.sh                      # Build frontend + restart systemd service
 ```
@@ -137,7 +141,7 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload && sudo systemctl enable --now serverctrl
 ```
-After that, `./deploy.sh` rebuilds the frontend and restarts the service.
+After that, `./deploy.sh` rebuilds the frontend and restarts the service. A restart ends every open web-terminal shell.
 
 ### 6. Sudo rights (service control, restart, shutdown)
 Grant **only** the exact commands the panel runs — never blanket `systemctl` access:
@@ -194,8 +198,10 @@ What's built in:
 |---|---|
 | **2FA (TOTP)** | Password + 6-digit code. Codes can't be replayed; wrong codes count toward lockout |
 | **Brute-force protection** | 5 failed logins / 15 min per IP, plus per-account lockout (15 min, doubling up to 24 h) that also stops attacks from rotating IPs. `CF-Connecting-IP` is only trusted on tunnel listeners, so it can't be forged to dodge the limit |
-| **Rate limiting** | 300 API requests / min per IP; real client IP read from `CF-Connecting-IP` |
+| **Rate limiting** | 300 API requests / min per IP; client IP from `CF-Connecting-IP` on tunnel listeners, from the socket everywhere else |
 | **Bot protection** | Cloudflare Turnstile on login (when keys are set) |
+| **Cloudflare Access** | Every request on a tunnel listener needs a valid Access token, including the terminal WebSocket, which is checked before any shell starts. Signature (cached keys, refreshed once on rotation), issuer, audience, expiry and optional email are verified; fails closed if keys can't be fetched. Listeners in `ACCESS_EXEMPT_LOCAL` (Tailscale, localhost) skip it, decided by the address a connection arrived on |
+| **Network exposure** | One listener per `BIND_HOST` address, so the panel can stay off the LAN; a missing interface is retried without affecting the others |
 | **Sessions** | `HttpOnly`, `Secure`, `SameSite=Strict`, new session id at login, server-side store |
 | **CSRF / WebSocket hijacking** | Origin checks on all state-changing requests and on the terminal WebSocket; JSON-only API |
 | **Hidden attack surface** | Anonymous users get `404` on every protected API route, and the dashboard code is only served after login |
@@ -210,6 +216,8 @@ Recommended deployment:
 4. **Optional:** put the hostname behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) and set `CF_ACCESS_*` — requests without a valid Access token are then rejected even if someone reaches the origin directly. Set `ACCESS_ALLOWED_EMAILS` to pin it to your account, and `ACCESS_EXEMPT_LOCAL` for a Tailscale/localhost listener that doesn't go through Cloudflare.
 5. Bind only to the addresses you need (`BIND_HOST`) so the port isn't reachable from your LAN.
 6. If a Cloudflare Worker runs on the panel's hostname (e.g. the offline page), add a route `<host>/ws/*` with **Workers: None** — proxying the terminal WebSocket through a Worker dropped every keystroke.
+
+> **What the web shell can do.** The terminal runs as the service user. If that user is in the `docker` group, a shell can become root (`docker run -v /:/host …`); with sudo rights it can do anything sudo allows; and it can read everything the user can (this app's `.env`, tunnel tokens, SSH keys). Treat panel access as root access. For stronger isolation, run the service as a dedicated user outside the `docker` group.
 
 Maintenance commands:
 ```bash
@@ -229,7 +237,7 @@ Found a vulnerability? Please open a private security advisory on the repository
 ## Push notifications
 
 VAPID keys are generated on first start and stored in `backend/data/vapid.json` (gitignored).
-Enable notifications from the bell icon in the dashboard. You'll be notified about:
+Turn them on with **Push alerts** in the sidebar (bell icon in the top bar on mobile). You'll be notified about:
 server online / restarting / shutting down, CPU > 85 %, RAM > 90 %, container crashes,
 failed services, new logins, account lockouts and repeated 2FA failures.
 
@@ -238,6 +246,9 @@ failed services, new logins, account lockouts and repeated 2FA failures.
 `cloudflare-worker/offline-worker.js` shows a status page when your server is unreachable.
 Set `SITE_DOMAIN` and `SERVER_NAME` at the top, then in Cloudflare: **Workers & Pages → Create Worker**,
 paste the file, deploy, and add the route `your-domain.com/*`.
+Also add a second route `your-domain.com/ws/*` with **Workers: None** so the terminal's WebSocket never passes through the Worker
+(proxied through it, browser → server frames were lost: the terminal said "Connected" but keystrokes never arrived).
+The Worker also passes WebSocket upgrades straight through as a second safeguard.
 
 ---
 
@@ -278,8 +289,10 @@ cd backend && npm run dev          # API on :3000
 cd frontend && npx vite            # UI on :5173, proxies /api and /ws to :3000
 ```
 
+Terminal over the dev proxy: Vite forwards `/ws` to the backend, so `http://localhost:5173/terminal` works like production.
+
 The repo includes [graphify](https://github.com/Graphify-Labs/graphify) settings (`.graphifyignore`, `CLAUDE.md`) for AI-assisted navigation. Optional:
-`pip install graphifyy && graphify update .` builds a local code graph in `graphify-out/` (gitignored).
+`pip install graphifyy && graphify update .` builds a local code graph in `graphify-out/` (gitignored). Run `graphify update .` again after code changes to keep it current (AST only, no API cost).
 
 ---
 
