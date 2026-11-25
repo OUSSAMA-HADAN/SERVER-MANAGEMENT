@@ -1,4 +1,4 @@
-const CACHE_NAME = 'serverctrl-v5';
+const CACHE_NAME = 'serverctrl-v6';
 const STATIC_ASSETS = ['/', '/index.html'];
 
 self.addEventListener('install', (e) => {
@@ -13,11 +13,13 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Only handle same-origin requests, skip API calls and external URLs
-  if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/api/')) return;
+  // Only same-origin GETs; never API calls, the terminal socket or other sites.
+  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/')) return;
+  // Network first; offline navigations fall back to the cached app shell.
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request).then((r) => r || Response.error()))
+    fetch(e.request).catch(() =>
+      caches.match(e.request).then((r) => r || (e.request.mode === 'navigate' ? caches.match('/') : Response.error())))
   );
 });
 

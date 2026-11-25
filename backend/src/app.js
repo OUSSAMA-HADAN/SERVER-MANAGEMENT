@@ -20,6 +20,7 @@ const statsRoutes = require('./routes/stats');
 const systemRoutes = require('./routes/system');
 const containerLinksRoutes = require('./routes/containerLinks');
 const pushRoutes = require('./routes/push');
+const terminalRoutes = require('./routes/terminal');
 
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
@@ -57,6 +58,7 @@ app.use('/api/stats', statsRoutes);
 app.use('/api/system', systemRoutes);
 app.use('/api/container-links', containerLinksRoutes);
 app.use('/api/push', pushRoutes);
+app.use('/api/terminal', terminalRoutes);
 
 if (isProd) {
   const distPath = path.join(__dirname, '../../frontend/dist');

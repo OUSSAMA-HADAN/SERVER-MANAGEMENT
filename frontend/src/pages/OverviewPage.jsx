@@ -1,206 +1,235 @@
-import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { apiFetch } from '../App.jsx';
+import { api } from '../lib/api.js';
+import { useMetrics } from '../lib/metrics.jsx';
+import { usePolling } from '../lib/usePolling.js';
+import { usePageTitle } from '../lib/usePageTitle.js';
+import { bytes, duration, durationLong, pct, rate, tone } from '../lib/format.js';
 import { useConfirm } from '../components/ConfirmModal.jsx';
+import { useToast } from '../components/Toast.jsx';
+import Icon from '../components/Icon.jsx';
+import { Empty, ErrorAlert, Meter, PageHeader, Sparkline, Status } from '../components/ui.jsx';
+import { serviceTone, serviceLabel } from './ServicesPage.jsx';
 
-function QuickCard({ icon, title, value, sub, linkTo, color = 'var(--green)' }) {
+const TONE_TEXT = { ok: 'Normal', warn: 'High', danger: 'Critical' };
+
+function MetricCard({ icon, title, value, unit, t = 'ok', spark, sparkLabel, sparkMax, meter, meterLabel, children }) {
   return (
-    <Link to={linkTo} style={{ textDecoration: 'none' }}>
-      <div
-        className="card bracket fade-in"
-        style={{ cursor: 'pointer', transition: 'border-color 0.2s, box-shadow 0.2s', position: 'relative' }}
-        onMouseEnter={e => {
-          e.currentTarget.style.borderColor = color;
-          e.currentTarget.style.boxShadow = `0 0 20px ${color}18`;
-        }}
-        onMouseLeave={e => {
-          e.currentTarget.style.borderColor = 'var(--border)';
-          e.currentTarget.style.boxShadow = 'none';
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: 'var(--muted)', fontSize: '10px', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: '8px' }}>
-              {title}
-            </div>
-            <div style={{ color, fontSize: 'clamp(22px, 4vw, 28px)', fontFamily: 'Syne', fontWeight: 800, lineHeight: 1 }}>
-              {value}
-            </div>
-            {sub && <div style={{ color: 'var(--muted)', fontSize: '11px', marginTop: '4px' }}>{sub}</div>}
-          </div>
-          <span style={{ fontSize: '22px', opacity: 0.2, flexShrink: 0, marginLeft: '8px' }}>{icon}</span>
-        </div>
+    <section className="card metric" aria-label={title}>
+      <div className="metric-top">
+        <Icon name={icon} size={16} />
+        <h2 style={{ fontSize: 'inherit', fontWeight: 'inherit' }}>{title}</h2>
+        {t !== 'ok' && <span style={{ marginLeft: 'auto' }}><Status tone={t}>{TONE_TEXT[t]}</Status></span>}
       </div>
-    </Link>
+      <div className="metric-value">{value}{unit && <small>{unit}</small>}</div>
+      {meter !== undefined && <Meter value={meter} label={meterLabel || title} tone={t} />}
+      {spark && <div className={`tone-${t}`}><Sparkline values={spark} max={sparkMax} label={sparkLabel} /></div>}
+      {children && <div className="metric-foot">{children}</div>}
+    </section>
   );
 }
 
-function ServiceRow({ name, status }) {
-  const active = status === 'active';
+function SkeletonCards() {
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '8px 0', borderBottom: '1px solid rgba(30,30,36,0.5)',
-      gap: '8px',
-    }}>
-      <span style={{ color: 'var(--text)', fontSize: '12px', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
-      <span className={`badge badge-${active ? 'active' : 'inactive'}`}>
-        {active ? '● active' : '○ inactive'}
-      </span>
+    <div className="grid grid-metrics" aria-busy="true" aria-label="Loading metrics">
+      {[0, 1, 2, 3].map((i) => <div key={i} className="card skeleton" style={{ height: 150 }} />)}
     </div>
   );
 }
 
 export default function OverviewPage() {
+  usePageTitle('Overview');
   const confirm = useConfirm();
-  const [services, setServices] = useState([]);
-  const [containers, setContainers] = useState([]);
-  const [links, setLinks] = useState({});
-  const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const toast = useToast();
+  const { metrics: m, history, error: metricsError } = useMetrics();
 
-  useEffect(() => {
-    const fetchData = () => {
-      Promise.all([
-        apiFetch('/api/services').then(r => r.json()),
-        apiFetch('/api/docker/containers').then(r => r.json()),
-        apiFetch('/api/container-links').then(r => r.json()),
-        apiFetch('/api/stats').then(r => r.json()),
-      ]).then(([s, c, l, st]) => {
-        setServices(Array.isArray(s) ? s : []);
-        setContainers(Array.isArray(c) ? c : []);
-        setLinks(l || {});
-        setStats(st && !st.error ? st : null);
-      }).catch(() => {}).finally(() => setLoading(false));
-    };
+  const services = usePolling((signal) => api('/api/services', { signal }), 15000);
+  const containers = usePolling(async (signal) => {
+    const [list, links] = await Promise.all([
+      api('/api/docker/containers', { signal }),
+      api('/api/container-links', { signal }).catch(() => ({})),
+    ]);
+    return { list, links };
+  }, 15000);
 
-    fetchData();
-    const iv = setInterval(fetchData, 5000);
-    return () => clearInterval(iv);
-  }, []);
+  const power = async (kind) => {
+    const restart = kind === 'restart';
+    const ok = await confirm(restart ? 'Restart the server?' : 'Shut down the server?', {
+      detail: restart
+        ? 'The machine reboots now. Every shell, container and connection drops until it is back.'
+        : 'The machine powers off. You will need physical or out-of-band access to turn it back on.',
+      danger: true,
+      confirmLabel: restart ? 'Restart now' : 'Shut down',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/system/${kind}`, { method: 'POST' });
+      toast.success(restart ? 'Restarting… the panel will be back shortly.' : 'Shutting down…');
+    } catch (e) {
+      toast.error(e.message);
+    }
+  };
 
-  const activeServices = services.filter(s => s.status === 'active').length;
-  const runningContainers = containers.filter(c => c.state === 'running').length;
+  const memPct = m?.memTotal ? (m.memUsed / m.memTotal) * 100 : 0;
+  const diskPct = m?.diskTotal ? (m.diskUsed / m.diskTotal) * 100 : 0;
+  const svc = services.data || [];
+  const activeSvc = svc.filter((s) => s.status === 'active').length;
+  const ctr = containers.data?.list || [];
+  const links = containers.data?.links || {};
+  const runningCtr = ctr.filter((c) => c.state === 'running').length;
 
   return (
-    <div className="fade-in">
-      {/* Header */}
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">System Overview</h1>
-          <p className="page-subtitle">
-            {new Date().toLocaleString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-          </p>
-        </div>
-      </div>
+    <div className="page">
+      <PageHeader
+        title="Overview"
+        subtitle={m ? (
+          <>
+            <span className="mono">{m.hostname}</span> · Linux {m.kernel} · <span aria-label={`up ${durationLong(m.uptime)}`}>up {duration(m.uptime)}</span>
+          </>
+        ) : 'Live health of your server'}
+      >
+        <Link to="/terminal" className="btn btn-primary"><Icon name="terminal" size={16} /> Open terminal</Link>
+      </PageHeader>
 
-      {/* Quick stats grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '24px' }}>
-        <QuickCard
-          icon="🌡"
-          title="CPU Temp"
-          linkTo="/"
-          value={stats?.temp ? `${stats.temp}°C` : (loading ? '—' : 'N/A')}
-          sub={stats?.temp ? (stats.temp > 75 ? 'high temp' : 'optimal') : ''}
-          color={stats?.temp > 75 ? 'var(--red)' : 'var(--green)'}
-        />
-        <QuickCard icon="⚙"  title="Services"   linkTo="/services"  value={loading ? '—' : `${activeServices}/${services.length}`}   sub="active" />
-        <QuickCard icon="◈"  title="Containers" linkTo="/docker"    value={loading ? '—' : `${runningContainers}/${containers.length}`} sub="running" />
-        <QuickCard icon="▦"  title="Processes"  linkTo="/processes" value="top 40"  sub="by CPU"    color="#00b8e8" />
-        <QuickCard icon=">_" title="Terminal"   linkTo="/terminal"  value="bash"    sub="live shell" color="var(--yellow)" />
-      </div>
-
-      {/* Two-column cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px', marginBottom: '16px' }}>
-
-        {/* Services */}
-        <div className="card">
-          <div className="section-header">
-            <span style={{ color: 'var(--green)', fontSize: '13px' }}>⚙</span>
-            <h2>Services</h2>
-            <Link to="/services" style={{ marginLeft: 'auto', color: 'var(--muted)', fontSize: '11px', textDecoration: 'none', flexShrink: 0 }}>
-              manage →
-            </Link>
+      <div className="stack">
+        {metricsError && !m && <ErrorAlert error={metricsError} />}
+        {!m ? <SkeletonCards /> : (
+          <div className="grid grid-metrics">
+            <MetricCard
+              icon="cpu" title="CPU" value={m.cpu.toFixed(0)} unit="%"
+              t={tone(m.cpu, 70, 90)} spark={history.cpu} sparkMax={100}
+              sparkLabel={`CPU usage over the last ${history.cpu.length * 3} seconds, now ${pct(m.cpu)}`}
+            >
+              <span>Load <span className="mono num">{m.load.join(' · ')}</span></span>
+              <span>{m.cores} cores</span>
+            </MetricCard>
+            <MetricCard
+              icon="memory" title="Memory" value={bytes(m.memUsed)} unit={`/ ${bytes(m.memTotal)}`}
+              t={tone(memPct, 80, 92)} meter={memPct} meterLabel="Memory used"
+            >
+              <span>{pct(memPct)} used</span>
+              {m.swapTotal > 0 && <span>Swap {bytes(m.swapUsed)} / {bytes(m.swapTotal)}</span>}
+            </MetricCard>
+            <MetricCard
+              icon="disk" title="Disk (/)" value={bytes(m.diskUsed)} unit={`/ ${bytes(m.diskTotal)}`}
+              t={tone(diskPct, 80, 92)} meter={diskPct} meterLabel="Root disk used"
+            >
+              <span>{bytes(m.diskFree)} free</span>
+              <span>{pct(diskPct)} used</span>
+            </MetricCard>
+            {m.temp != null && (
+              <MetricCard icon="temp" title="CPU temperature" value={m.temp} unit="°C" t={tone(m.temp, 70, 85)} meter={m.temp} meterLabel="CPU temperature">
+                <span>{m.temp >= 85 ? 'Check cooling now' : m.temp >= 70 ? 'Running warm' : 'Within normal range'}</span>
+              </MetricCard>
+            )}
+            <MetricCard
+              icon="network" title="Network" value={rate(m.rxRate)} unit="in"
+              spark={history.rx} sparkLabel={`Incoming traffic, now ${rate(m.rxRate)}`}
+            >
+              <span>Out {rate(m.txRate)}</span>
+            </MetricCard>
           </div>
-          {loading ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}><span className="spinner" /></div>
-          ) : (
-            services.map(s => <ServiceRow key={s.name} {...s} />)
-          )}
-        </div>
+        )}
 
-        {/* Docker */}
-        <div className="card">
-          <div className="section-header">
-            <span style={{ color: 'var(--green)', fontSize: '13px' }}>◈</span>
-            <h2>Containers</h2>
-            <Link to="/docker" style={{ marginLeft: 'auto', color: 'var(--muted)', fontSize: '11px', textDecoration: 'none', flexShrink: 0 }}>
-              manage →
-            </Link>
-          </div>
-          {loading ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}><span className="spinner" /></div>
-          ) : containers.length === 0 ? (
-            <p style={{ color: 'var(--muted)', fontSize: '12px', textAlign: 'center', padding: '20px 0', margin: 0 }}>No containers found</p>
-          ) : (
-            containers.slice(0, 6).map(c => (
-              <div key={c.id} style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '8px 0', borderBottom: '1px solid rgba(30,30,36,0.5)', gap: '8px',
-              }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ color: 'var(--text)', fontSize: '12px', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
-                  <div style={{ color: 'var(--muted)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.image}</div>
-                </div>
-                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
-                  <span className={`badge badge-${c.state === 'running' ? 'running' : 'exited'}`}>{c.state}</span>
-                  {links[c.name] && (
-                    <a href={links[c.name]} target="_blank" rel="noopener noreferrer" className="btn btn-muted" style={{ padding: '2px 8px', textDecoration: 'none' }}>↗</a>
-                  )}
-                </div>
+        <div className="grid grid-2">
+          <section className="card" aria-labelledby="ov-services">
+            <div className="card-head">
+              <Icon name="services" size={18} />
+              <h2 id="ov-services" className="card-title">Services</h2>
+              {services.data && <span className="chip">{activeSvc}/{svc.length} active</span>}
+              <Link to="/services" className="link-more">Manage<Icon name="chevronRight" size={14} /></Link>
+            </div>
+            <ErrorAlert error={services.error} onRetry={services.refresh} />
+            {services.loading ? <div className="skeleton" style={{ height: 200 }} /> : (
+              <ul className="list">
+                {svc.map((s) => (
+                  <li key={s.name} className="list-item">
+                    <div className="list-main">
+                      <div className="list-title mono">{s.name}</div>
+                      {s.description && <div className="list-sub truncate">{s.description}</div>}
+                    </div>
+                    <Status tone={serviceTone(s.status)}>{serviceLabel(s.status)}</Status>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="card" aria-labelledby="ov-containers">
+            <div className="card-head">
+              <Icon name="docker" size={18} />
+              <h2 id="ov-containers" className="card-title">Containers</h2>
+              {containers.data && <span className="chip">{runningCtr}/{ctr.length} running</span>}
+              <Link to="/docker" className="link-more">Manage<Icon name="chevronRight" size={14} /></Link>
+            </div>
+            <ErrorAlert error={containers.error} onRetry={containers.refresh} />
+            {containers.loading ? <div className="skeleton" style={{ height: 200 }} /> : ctr.length === 0 ? (
+              !containers.error && <Empty icon="docker" title="No containers">Containers you create with Docker show up here.</Empty>
+            ) : (
+              <ul className="list">
+                {ctr.slice(0, 7).map((c) => (
+                  <li key={c.id} className="list-item">
+                    <div className="list-main">
+                      <div className="list-title truncate">{c.name}</div>
+                      <div className="list-sub truncate mono">{c.image}</div>
+                    </div>
+                    {links[c.name] && (
+                      <a href={links[c.name]} target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-icon btn-sm" aria-label={`Open ${c.name} in a new tab`}>
+                        <Icon name="external" size={16} />
+                      </a>
+                    )}
+                    <Status tone={c.state === 'running' ? 'ok' : c.state === 'restarting' ? 'warn' : c.state === 'dead' ? 'danger' : 'idle'}>{c.state}</Status>
+                  </li>
+                ))}
+                {ctr.length > 7 && (
+                  <li className="list-item"><Link to="/docker" className="muted">+ {ctr.length - 7} more containers</Link></li>
+                )}
+              </ul>
+            )}
+          </section>
+
+          {m?.disks?.length > 0 && (
+            <section className="card" aria-labelledby="ov-storage">
+              <div className="card-head">
+                <Icon name="disk" size={18} />
+                <h2 id="ov-storage" className="card-title">Storage</h2>
               </div>
-            ))
+              <ul className="list">
+                {m.disks.map((d) => {
+                  const p = d.total ? (d.used / d.total) * 100 : 0;
+                  return (
+                    <li key={d.device} className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+                      <div className="row">
+                        <span className="mono list-title truncate">{d.mount}</span>
+                        <span className="muted mono" style={{ fontSize: 'var(--fs-xs)' }}>{d.device}</span>
+                        <span className="spacer" />
+                        <span className="num" style={{ fontSize: 'var(--fs-sm)' }}>{bytes(d.used)} / {bytes(d.total)}</span>
+                      </div>
+                      <Meter value={p} label={`${d.mount} used`} tone={tone(p, 80, 92)} valueText={`${pct(p)} used, ${bytes(d.free)} free`} />
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
           )}
+
+          <section className="card danger-zone" aria-labelledby="ov-power">
+            <div className="card-head">
+              <Icon name="power" size={18} />
+              <h2 id="ov-power" className="card-title">Power</h2>
+            </div>
+            <p className="muted" style={{ marginBottom: 16, fontSize: 'var(--fs-sm)' }}>
+              These act on the whole machine and need a passwordless sudo rule for <code>shutdown</code>.
+            </p>
+            <div className="btn-group">
+              <button type="button" className="btn btn-danger-soft" onClick={() => power('restart')}>
+                <Icon name="restart" size={16} /> Restart server
+              </button>
+              <button type="button" className="btn btn-danger-soft" onClick={() => power('shutdown')}>
+                <Icon name="power" size={16} /> Shut down
+              </button>
+            </div>
+          </section>
         </div>
-      </div>
-
-      {/* Terminal hint */}
-      <div style={{
-        padding: '11px 16px',
-        background: 'rgba(0,232,162,0.04)',
-        border: '1px solid rgba(0,232,162,0.1)',
-        borderRadius: '4px',
-        display: 'flex', alignItems: 'center', gap: '10px',
-        marginBottom: '10px',
-      }}>
-        <span style={{ color: 'var(--green)', fontSize: '12px', flexShrink: 0 }}>{'>'}_</span>
-        <span style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'JetBrains Mono' }}>
-          Live terminal — <Link to="/terminal" style={{ color: 'var(--green)', textDecoration: 'none' }}>open bash shell</Link>
-        </span>
-      </div>
-
-      {/* Power controls */}
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-        <button
-          className="btn"
-          style={{ background: 'rgba(232,100,0,0.08)', border: '1px solid rgba(232,100,0,0.28)', color: '#e86400' }}
-          onClick={async () => {
-            if (!await confirm('Restart the server?', { detail: 'The server will reboot. You will lose the current session.', danger: true })) return;
-            await apiFetch('/api/system/restart', { method: 'POST' });
-          }}
-        >
-          ↺ Restart
-        </button>
-        <button
-          className="btn"
-          style={{ background: 'rgba(232,0,0,0.08)', border: '1px solid rgba(232,0,0,0.28)', color: '#e84040' }}
-          onClick={async () => {
-            if (!await confirm('Shut down the server?', { detail: 'The server will power off completely.', danger: true })) return;
-            await apiFetch('/api/system/shutdown', { method: 'POST' });
-          }}
-        >
-          ⏻ Shutdown
-        </button>
       </div>
     </div>
   );

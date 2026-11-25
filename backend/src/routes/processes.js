@@ -1,33 +1,30 @@
 const router = require('express').Router();
-const { exec } = require('child_process');
-const { promisify } = require('util');
 const { requireAuth } = require('../middleware/auth');
-
-const execAsync = promisify(exec);
+const { listProcesses } = require('../services/procs');
 
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { stdout } = await execAsync(
-      "ps aux --sort=-%cpu | awk 'NR>1{print $2,$3,$4,$11}' | head -40"
-    );
-    const processes = stdout.trim().split('\n').map((line) => {
-      const parts = line.split(' ');
-      return { pid: parts[0], cpu: parts[1], mem: parts[2], cmd: parts.slice(3).join(' ') };
-    });
+    const { processes } = await listProcesses(150);
     res.json(processes);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[processes]', e.message);
+    res.status(500).json({ error: 'Could not list processes' });
   }
 });
 
-router.delete('/:pid', requireAuth, async (req, res) => {
-  const pid = parseInt(req.params.pid, 10);
-  if (isNaN(pid) || pid < 2) return res.status(400).json({ error: 'Invalid PID' });
+router.delete('/:pid', requireAuth, (req, res) => {
+  const pid = Number.parseInt(req.params.pid, 10);
+  const signal = req.query.signal === 'KILL' ? 'SIGKILL' : 'SIGTERM';
+  if (!Number.isInteger(pid) || pid < 2) return res.status(400).json({ error: 'Invalid PID' });
+  if (pid === process.pid || pid === process.ppid) return res.status(400).json({ error: 'Refusing to kill the panel itself' });
   try {
-    await execAsync(`kill -9 ${pid}`);
-    res.json({ ok: true });
+    process.kill(pid, signal);
+    res.json({ ok: true, signal });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const msg = e.code === 'ESRCH' ? 'Process no longer exists'
+      : e.code === 'EPERM' ? 'Permission denied: the process belongs to another user'
+      : e.message;
+    res.status(e.code === 'ESRCH' ? 404 : 403).json({ error: msg });
   }
 });
 

@@ -1,11 +1,9 @@
 const webpush = require('web-push');
 const path = require('path');
 const fs = require('fs');
-const { exec } = require('child_process');
-const { promisify } = require('util');
+const { getMetrics } = require('./metrics');
+const { run } = require('./run');
 const SERVER_NAME = process.env.SERVER_NAME || 'server';
-
-const execAsync = promisify(exec);
 
 // ── VAPID keys ──────────────────────────────────────────────
 const VAPID_PATH = path.join(__dirname, '../../data/vapid.json');
@@ -61,13 +59,9 @@ const containerStates = new Map();
 
 async function checkStats() {
   try {
-    const [cpuOut, memOut] = await Promise.all([
-      execAsync("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"),
-      execAsync("free -b | awk '/^Mem:/{print $2, $3}'"),
-    ]);
-    const cpu = parseFloat(cpuOut.stdout.trim());
-    const [total, used] = memOut.stdout.trim().split(' ').map(Number);
-    const ram = (used / total) * 100;
+    const m = await getMetrics();
+    const cpu = m.cpu;
+    const ram = (m.memUsed / m.memTotal) * 100;
 
     if (cpu > 85 && !cpuAlerted) {
       cpuAlerted = true;
@@ -87,10 +81,11 @@ async function checkStats() {
 
 async function checkContainers() {
   try {
-    const { stdout } = await execAsync(
-      `docker ps -a --format '{"id":"{{.ID}}","name":"{{.Names}}","state":"{{.State}}"}'`
-    );
-    const containers = stdout.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const { stdout } = await run('docker', ['ps', '-a', '--format', '{{json .}}']);
+    const containers = stdout.trim().split('\n').filter(Boolean).map((l) => {
+      const c = JSON.parse(l);
+      return { id: c.ID, name: c.Names, state: c.State };
+    });
 
     for (const c of containers) {
       const prev = containerStates.get(c.id);

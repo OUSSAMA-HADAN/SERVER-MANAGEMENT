@@ -4,6 +4,7 @@ const User = require('../models/User');
 const totp = require('../services/totp');
 const { requireAuth } = require('../middleware/auth');
 const { sendToAll } = require('../services/notifications');
+const { killSessionsForSid } = require('../websocket/terminal');
 const {
   clientIp,
   clientCountry,
@@ -140,6 +141,7 @@ router.post('/totp', loginLimiter, async (req, res) => {
 });
 
 router.post('/logout', (req, res) => {
+  killSessionsForSid(req.sessionID);
   req.session.destroy(() => {
     res.clearCookie('sc.sid', { httpOnly: true, sameSite: 'strict' });
     res.json({ ok: true });

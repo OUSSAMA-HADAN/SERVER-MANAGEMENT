@@ -1,192 +1,120 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { useAuth, SERVER_NAME } from '../../App.jsx';
-import StatsBar from '../stats/StatsBar.jsx';
-import NotificationBell from '../NotificationBell.jsx';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../lib/auth.jsx';
+import { SERVER_NAME, APP_TITLE } from '../../lib/api.js';
+import Icon from '../Icon.jsx';
+import NotificationToggle from '../NotificationToggle.jsx';
+import StatsStrip from './StatsStrip.jsx';
 
-const NAV_ITEMS = [
-  { to: '/',          exact: true, icon: '⬡',  label: 'Overview'  },
-  { to: '/services',              icon: '⚙',   label: 'Services'  },
-  { to: '/docker',                icon: '◈',   label: 'Docker'    },
-  { to: '/processes',             icon: '▦',   label: 'Processes' },
-  { to: '/terminal',              icon: '>_',  label: 'Terminal'  },
+const TerminalPage = lazy(() => import('../../pages/TerminalPage.jsx'));
+
+const NAV = [
+  { to: '/', label: 'Overview', icon: 'overview', end: true },
+  { to: '/services', label: 'Services', icon: 'services' },
+  { to: '/docker', label: 'Docker', icon: 'docker' },
+  { to: '/processes', label: 'Processes', icon: 'processes' },
+  { to: '/terminal', label: 'Terminal', icon: 'terminal' },
 ];
 
-function SidebarLink({ to, icon, label, exact }) {
-  return (
-    <NavLink
-      to={to}
-      end={exact}
-      style={({ isActive }) => ({
-        display: 'flex',
-        alignItems: 'center',
-        gap: '10px',
-        padding: '8px 12px',
-        borderRadius: '4px',
-        border: '1px solid',
-        textDecoration: 'none',
-        color: isActive ? 'var(--green)' : 'var(--muted)',
-        background: isActive ? 'rgba(0,232,162,0.06)' : 'transparent',
-        borderColor: isActive ? 'rgba(0,232,162,0.18)' : 'transparent',
-        boxShadow: isActive ? 'inset 2px 0 0 var(--green)' : 'none',
-        fontSize: '11px',
-        fontFamily: 'JetBrains Mono, monospace',
-        transition: 'all 0.15s',
-        letterSpacing: '0.06em',
-      })}
-    >
-      <span style={{ fontSize: '13px', width: '16px', textAlign: 'center', flexShrink: 0 }}>{icon}</span>
-      <span>{label}</span>
-    </NavLink>
-  );
-}
-
-function BottomNavLink({ to, icon, label, exact }) {
-  return (
-    <NavLink
-      to={to}
-      end={exact}
-      style={({ isActive }) => ({
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: '2px',
-        padding: '8px 4px',
-        flex: 1,
-        textDecoration: 'none',
-        color: isActive ? 'var(--green)' : 'var(--muted)',
-        fontSize: '9px',
-        letterSpacing: '0.08em',
-        textTransform: 'uppercase',
-        fontFamily: 'JetBrains Mono',
-        borderTop: isActive ? '2px solid var(--green)' : '2px solid transparent',
-        background: isActive ? 'rgba(0,232,162,0.04)' : 'transparent',
-        transition: 'all 0.15s',
-      })}
-    >
-      <span style={{ fontSize: '15px', lineHeight: 1 }}>{icon}</span>
-      <span>{label}</span>
-    </NavLink>
-  );
+function useOnline() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', down); };
+  }, []);
+  return online;
 }
 
 export default function DashboardLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const online = useOnline();
+  const onTerminal = pathname === '/terminal';
+  const [terminalMounted, setTerminalMounted] = useState(onTerminal);
+
+  useEffect(() => { if (onTerminal) setTerminalMounted(true); }, [onTerminal]);
 
   const handleLogout = async () => {
     await logout();
-    navigate('/login');
+    navigate('/login', { replace: true });
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+    <>
+      <a className="skip-link" href="#main">Skip to main content</a>
+      <div className="shell">
+        <aside className="sidebar">
+          <Link to="/" className="brand" aria-label={`${APP_TITLE} home`}>
+            <span className="brand-mark" aria-hidden="true"><Icon name="skull" size={20} /></span>
+            <span style={{ minWidth: 0 }}>
+              <span className="brand-name" style={{ display: 'block' }}>{APP_TITLE}</span>
+              <span className="brand-host truncate" style={{ display: 'block' }}>{SERVER_NAME}</span>
+            </span>
+          </Link>
 
-      <StatsBar />
-
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-
-        {/* Sidebar — desktop only */}
-        <aside className="desktop-sidebar" style={{
-          width: 'var(--sidebar-w)',
-          borderRight: '1px solid var(--border)',
-          background: 'linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.2) 100%)',
-          flexDirection: 'column',
-          padding: '14px 10px',
-          flexShrink: 0,
-        }}>
-          {/* Logo */}
-          <div style={{ padding: '4px 10px 16px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{
-                fontSize: '20px', lineHeight: 1,
-                filter: 'drop-shadow(0 0 8px rgba(0,232,162,0.4))',
-              }}>☠</span>
-              <div>
-                <div style={{ fontFamily: 'Syne', fontWeight: 700, fontSize: '13px', color: 'var(--text)', letterSpacing: '0.08em' }}>
-                  ServerCtrl
-                </div>
-                <div style={{ fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.12em', marginTop: '1px' }}>
-                  {SERVER_NAME}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ height: '1px', background: 'var(--border)', margin: '0 4px 12px' }} />
-
-          {/* Nav */}
-          <nav style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: 1 }}>
-            {NAV_ITEMS.map(item => <SidebarLink key={item.to} {...item} />)}
+          <nav className="nav" aria-label="Main">
+            {NAV.map((n) => (
+              <NavLink key={n.to} to={n.to} end={n.end} className="nav-link">
+                <Icon name={n.icon} size={18} />
+                {n.label}
+              </NavLink>
+            ))}
           </nav>
 
-          {/* User + logout */}
-          <div style={{ borderTop: '1px solid var(--border)', paddingTop: '12px', marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '7px', padding: '0 10px', marginBottom: '4px' }}>
-              <div style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 5px rgba(0,232,162,0.5)', flexShrink: 0 }} />
-              <span style={{ fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.1em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {user?.username}
+          <div className="sidebar-foot">
+            <NotificationToggle />
+            <div className="user-chip">
+              <span className="avatar" aria-hidden="true">{user?.username?.[0] || '?'}</span>
+              <span className="truncate">
+                <span className="sr-only">Signed in as </span>{user?.username}
               </span>
             </div>
-            <NotificationBell />
-            <button
-              onClick={handleLogout}
-              className="btn btn-ghost"
-              style={{ width: '100%', justifyContent: 'flex-start', padding: '7px 10px' }}
-            >
-              ⏻ logout
+            <button type="button" className="btn btn-ghost" style={{ justifyContent: 'flex-start' }} onClick={handleLogout}>
+              <Icon name="logout" size={18} /> Sign out
             </button>
           </div>
         </aside>
 
-        {/* Main content */}
-        <main style={{ flex: 1, overflow: 'auto', padding: 'var(--page-pad)' }}>
-          <Outlet />
+        <header className="topbar">
+          <Link to="/" className="topbar-brand" aria-label={`${APP_TITLE} home`}>
+            <span className="brand-mark" style={{ width: 30, height: 30 }} aria-hidden="true"><Icon name="skull" size={18} /></span>
+          </Link>
+          <StatsStrip />
+          <div className="topbar-actions">
+            {!online && (
+              <span className="status" data-tone="danger" role="status">
+                <Icon name="offline" size={14} /> Offline
+              </span>
+            )}
+            <span className="mobile-only"><NotificationToggle compact /></span>
+            <button type="button" className="btn btn-ghost btn-icon mobile-only" onClick={handleLogout} aria-label="Sign out" title="Sign out">
+              <Icon name="logout" size={18} />
+            </button>
+          </div>
+        </header>
+
+        <main id="main" className="main" tabIndex={-1}>
+          {!onTerminal && <Outlet />}
+          {terminalMounted && (
+            <Suspense fallback={<div className="center-screen" style={{ height: '100%' }}><span className="spinner" role="status" aria-label="Loading terminal" /></div>}>
+              <TerminalPage active={onTerminal} />
+            </Suspense>
+          )}
         </main>
-      </div>
 
-      {/* Floating notification bell — mobile only */}
-      <div className="mobile-bottom-nav" style={{
-        position: 'fixed',
-        bottom: '58px',
-        right: '14px',
-        zIndex: 50,
-      }}>
-        <NotificationBell style={{
-          width: 'auto',
-          justifyContent: 'center',
-          padding: '7px 11px',
-          background: 'rgba(10,10,11,0.95)',
-          backdropFilter: 'blur(12px)',
-          boxShadow: '0 2px 16px rgba(0,0,0,0.5)',
-        }} />
+        <nav className="bottom-nav" aria-label="Main">
+          {NAV.map((n) => (
+            <NavLink key={n.to} to={n.to} end={n.end} className="bottom-link">
+              <span className="bottom-ico"><Icon name={n.icon} size={20} /></span>
+              {n.label}
+            </NavLink>
+          ))}
+        </nav>
       </div>
-
-      {/* Bottom nav — mobile only */}
-      <nav className="mobile-bottom-nav" style={{
-        borderTop: '1px solid var(--border)',
-        background: 'rgba(10,10,11,0.97)',
-        backdropFilter: 'blur(12px)',
-        display: 'flex',
-        flexShrink: 0,
-      }}>
-        {NAV_ITEMS.map(item => <BottomNavLink key={item.to} {...item} />)}
-        <button
-          onClick={handleLogout}
-          style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center',
-            gap: '2px', padding: '8px 4px', flex: 1,
-            background: 'transparent', border: 'none',
-            borderTop: '2px solid transparent',
-            color: 'var(--muted)', fontSize: '9px',
-            letterSpacing: '0.08em', textTransform: 'uppercase',
-            fontFamily: 'JetBrains Mono', cursor: 'pointer',
-            transition: 'color 0.15s',
-          }}
-        >
-          <span style={{ fontSize: '15px', lineHeight: 1 }}>⏻</span>
-          <span>logout</span>
-        </button>
-      </nav>
-    </div>
+    </>
   );
 }

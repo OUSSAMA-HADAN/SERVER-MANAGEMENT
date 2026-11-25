@@ -13,31 +13,49 @@ const { rateLimit } = require('express-rate-limit');
 
 const isProd = process.env.NODE_ENV === 'production';
 
+// ─── Listener-based trust ───────────────────────────────────────────────────
+// Which local address a connection arrived on (not a header, so it can't be
+// spoofed). Listeners in ACCESS_EXEMPT_LOCAL (e.g. Tailscale, localhost) are
+// reached without Cloudflare; everything else is treated as tunnel traffic.
+const EXEMPT_LOCAL = new Set((process.env.ACCESS_EXEMPT_LOCAL || '')
+  .split(',').map((s) => s.trim()).filter(Boolean));
+const localAddr = (req) => (req.socket?.localAddress || '').replace(/^::ffff:/, '');
+const viaExempt = (req) => EXEMPT_LOCAL.has(localAddr(req));
+
 // ─── Client IP ──────────────────────────────────────────────────────────────
+// CF-Connecting-IP is set by Cloudflare, so it is only trusted on tunnel
+// listeners; on direct listeners anyone could send it to dodge rate limits.
 function clientIp(req) {
-  return (
-    req.headers['cf-connecting-ip'] ||
-    req.ip ||
-    req.socket?.remoteAddress ||
-    'unknown'
-  );
+  if (!viaExempt(req) && req.headers['cf-connecting-ip']) return req.headers['cf-connecting-ip'];
+  return (req.socket?.remoteAddress || 'unknown').replace(/^::ffff:/, '');
 }
 
 function clientCountry(req) {
   return req.headers['cf-ipcountry'] || '??';
 }
 
+// ─── Origin check (CSRF + cross-site WebSocket hijacking) ───────────────────
+const extraOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+if (!isProd) extraOrigins.push(process.env.FRONTEND_URL || 'http://localhost:5173');
+
 // ─── Security headers ───────────────────────────────────────────────────────
+// Explicit wss:// entries for configured origins (older Safari does not let
+// 'self' cover WebSockets).
+const wsOrigins = extraOrigins
+  .map((o) => { try { const u = new URL(o); return `${u.protocol === 'https:' ? 'wss' : 'ws'}://${u.host}`; } catch { return null; } })
+  .filter(Boolean);
+
 const securityHeaders = helmet({
   contentSecurityPolicy: {
     useDefaults: false,
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", 'https://challenges.cloudflare.com', 'https://static.cloudflareinsights.com'],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'", 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'", 'https://cloudflareinsights.com'],
+      connectSrc: ["'self'", ...wsOrigins, 'https://cloudflareinsights.com'],
       frameSrc: ['https://challenges.cloudflare.com'],
       workerSrc: ["'self'"],
       manifestSrc: ["'self'"],
@@ -52,11 +70,6 @@ const securityHeaders = helmet({
   hsts: isProd ? { maxAge: 31536000, includeSubDomains: true } : false,
   referrerPolicy: { policy: 'no-referrer' },
 });
-
-// ─── Origin check (CSRF + cross-site WebSocket hijacking) ───────────────────
-const extraOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map((s) => s.trim()).filter(Boolean);
-if (!isProd) extraOrigins.push(process.env.FRONTEND_URL || 'http://localhost:5173');
 
 function originAllowed(req, { requireOrigin = false } = {}) {
   const origin = req.headers.origin;
@@ -83,17 +96,72 @@ function originGuard(req, res, next) {
 }
 
 // ─── Cloudflare Access (Zero Trust) ─────────────────────────────────────────
-const CF_TEAM = process.env.CF_ACCESS_TEAM_DOMAIN; // e.g. myteam.cloudflareaccess.com
+const CF_TEAM = (process.env.CF_ACCESS_TEAM_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 const CF_AUD = process.env.CF_ACCESS_AUD;          // Application Audience (AUD) tag
 const accessEnabled = Boolean(CF_TEAM && CF_AUD);
+const ISSUER = `https://${CF_TEAM}`;
+// Test-only override; production always uses the team domain's certs.
+const CERTS_URL = process.env.CF_ACCESS_CERTS_URL || `${ISSUER}/cdn-cgi/access/certs`;
+const ALLOWED_EMAILS = new Set((process.env.ACCESS_ALLOWED_EMAILS || '')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
 
-let jwksPromise;
+const KEY_TTL_MS = 60 * 60 * 1000;      // routine refresh of the signing keys
+const KEY_REFRESH_GAP_MS = 30 * 1000;   // at most one fetch per 30 s (unknown kids can't force a fetch storm)
+let signingKeys = new Map();            // kid -> CryptoKey
+let keysFetchedAt = 0;
+let lastKeyFetch = 0;
+let keyFetch = null;
+
+async function fetchSigningKeys() {
+  const jose = require('jose');
+  const r = await fetch(CERTS_URL, { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`certs endpoint returned HTTP ${r.status}`);
+  const { keys } = await r.json();
+  const map = new Map();
+  for (const jwk of keys || []) {
+    if (jwk.kty !== 'RSA' || !jwk.kid) continue;
+    map.set(jwk.kid, await jose.importJWK({ ...jwk, alg: 'RS256' }, 'RS256'));
+  }
+  if (!map.size) throw new Error('certs endpoint returned no usable RSA keys');
+  signingKeys = map;
+  keysFetchedAt = Date.now();
+}
+
+/** Fetch keys unless a fetch ran in the last 30 s. Failures keep the old keys. */
+function refreshSigningKeys() {
+  if (keyFetch) return keyFetch;
+  if (Date.now() - lastKeyFetch < KEY_REFRESH_GAP_MS) return Promise.resolve();
+  lastKeyFetch = Date.now();
+  keyFetch = fetchSigningKeys()
+    .catch((e) => console.error(`[security] cannot fetch Cloudflare Access keys: ${e.message}`))
+    .finally(() => { keyFetch = null; });
+  return keyFetch;
+}
+
+async function keyForKid(kid) {
+  if (!signingKeys.size || Date.now() - keysFetchedAt > KEY_TTL_MS) await refreshSigningKeys();
+  if (!signingKeys.has(kid)) await refreshSigningKeys(); // rotated key: refresh once
+  const key = signingKeys.get(kid);
+  // No key (unknown kid, or keys never fetched) = reject: fail closed.
+  if (!key) throw Object.assign(new Error(`no signing key for kid ${String(kid).slice(0, 16)}`), { code: 'ERR_ACCESS_KEY' });
+  return key;
+}
+
 async function verifyAccessJwt(token) {
   const jose = require('jose');
-  const issuer = `https://${CF_TEAM.replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
-  if (!jwksPromise) jwksPromise = Promise.resolve(jose.createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`)));
-  const jwks = await jwksPromise;
-  const { payload } = await jose.jwtVerify(token, jwks, { issuer, audience: CF_AUD });
+  const { payload } = await jose.jwtVerify(token, (header) => keyForKid(header.kid), {
+    issuer: ISSUER,
+    audience: CF_AUD,
+    algorithms: ['RS256'],
+    requiredClaims: ['exp', 'iat'],
+    clockTolerance: 30,
+  });
+  if (ALLOWED_EMAILS.size) {
+    const email = String(payload.email || '').toLowerCase();
+    if (!ALLOWED_EMAILS.has(email)) {
+      throw Object.assign(new Error(`email not allowed: ${email || '(none)'}`), { code: 'ERR_ACCESS_EMAIL' });
+    }
+  }
   return payload;
 }
 
@@ -103,17 +171,36 @@ function getAccessToken(req) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-/** Returns the Access identity, `true` if Access is disabled, or null if rejected. */
+/**
+ * Returns the Access identity, `true` if Access is off or the request came in on
+ * an exempt listener (Tailscale/localhost), or null if it must be rejected.
+ */
 async function checkAccess(req) {
-  if (!accessEnabled) return true;
+  if (!accessEnabled || viaExempt(req)) return true;
   const token = getAccessToken(req);
-  if (!token) return null;
+  if (!token) {
+    console.warn(`[security] no Cloudflare Access token on ${localAddr(req)} ${req.method} ${(req.url || '').split('?')[0]} ip=${clientIp(req)}`);
+    return null;
+  }
   try {
     return await verifyAccessJwt(token);
   } catch (e) {
-    console.warn(`[security] invalid Cloudflare Access token ip=${clientIp(req)}: ${e.code || e.message}`);
+    console.warn(`[security] rejected Cloudflare Access token ip=${clientIp(req)}: ${e.code || ''} ${e.message}`);
     return null;
   }
+}
+
+/** Log the Access mode and pre-load the signing keys at startup. */
+function initAccess() {
+  if (!accessEnabled) {
+    console.log('[security] Cloudflare Access verification: off');
+    return Promise.resolve();
+  }
+  console.log(`[security] Cloudflare Access verification: on (team ${CF_TEAM}; exempt listeners: ${[...EXEMPT_LOCAL].join(', ') || 'none'}; allowed emails: ${ALLOWED_EMAILS.size || 'any'})`);
+  if (process.env.CF_ACCESS_CERTS_URL) {
+    console.warn(`[security] WARNING: CF_ACCESS_CERTS_URL is set (${CERTS_URL}). Tokens are verified against keys from that URL, not Cloudflare. Testing only — remove it in production.`);
+  }
+  return refreshSigningKeys();
 }
 
 async function cloudflareAccessGuard(req, res, next) {
@@ -214,6 +301,8 @@ module.exports = {
   originGuard,
   accessEnabled,
   checkAccess,
+  initAccess,
+  viaExempt,
   cloudflareAccessGuard,
   turnstileEnabled,
   TURNSTILE_SITE_KEY,

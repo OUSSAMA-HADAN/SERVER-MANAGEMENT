@@ -4,6 +4,9 @@
  * Deploy at: https://dash.cloudflare.com → Workers & Pages → Create Worker
  * Then add a Route: your-domain.com/* → this worker
  * and set SITE_DOMAIN below.
+ *
+ * Also add a second route, your-domain.com/ws/* → Workers: None, so the web
+ * terminal's WebSocket never passes through this Worker (see fetch() below).
  */
 
 const SITE_DOMAIN = 'your-domain.com';
@@ -281,8 +284,16 @@ const OFFLINE_HTML = `<!DOCTYPE html>
 
 export default {
   async fetch(request, env, ctx) {
+    // WebSockets (the web terminal) must reach the origin untouched. Proxying
+    // them through the wrapper below dropped every browser → server frame:
+    // the terminal showed "Connected" but keystrokes never arrived.
+    // Also exclude the path with a route that has no Worker:
+    //   <your-domain>/ws/*  →  Workers: None
+    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      return fetch(request);
+    }
+
     // Only intercept GET/HEAD — let API requests pass and fail naturally
-    const url = new URL(request.url);
     const isPage = request.method === 'GET' || request.method === 'HEAD';
 
     try {

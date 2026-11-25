@@ -1,51 +1,38 @@
-import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth, apiFetch, APP_TITLE } from '../App.jsx';
-
-function BloodRain() {
-  const drops = Array.from({ length: 35 }, (_, i) => ({
-    id: i,
-    left: `${Math.random() * 100}%`,
-    height: `${Math.random() * 80 + 40}px`,
-    duration: `${Math.random() * 1.5 + 1}s`,
-    delay: `${Math.random() * 4}s`,
-    opacity: Math.random() * 0.35 + 0.2,
-  }));
-  return (
-    <div style={{ position: 'fixed', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 0 }}>
-      {drops.map(d => (
-        <div key={d.id} style={{
-          position: 'absolute', top: '-80px', left: d.left,
-          width: '2px', height: d.height,
-          background: 'linear-gradient(to bottom, transparent, #6b0000, #cc0000)',
-          borderRadius: '0 0 3px 3px',
-          animation: `rain-fall ${d.duration} ${d.delay} linear infinite`,
-          opacity: d.opacity,
-        }} />
-      ))}
-    </div>
-  );
-}
+import { useEffect, useId, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { api, APP_TITLE, SERVER_NAME } from '../lib/api.js';
+import { useAuth } from '../lib/auth.jsx';
+import { usePageTitle } from '../lib/usePageTitle.js';
+import Icon from '../components/Icon.jsx';
 
 export default function LoginPage() {
+  usePageTitle('Sign in');
+  const { login, expired } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const [step, setStep] = useState('password'); // 'password' | 'totp'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
+  const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
-  const navigate = useNavigate();
+
   const [siteKey, setSiteKey] = useState(null);
-  const [step, setStep] = useState('password'); // 'password' | 'totp'
-  const [code, setCode] = useState('');
   const [turnstileToken, setTurnstileToken] = useState('');
   const widgetRef = useRef(null);
   const widgetId = useRef(null);
+  const codeRef = useRef(null);
+  const userRef = useRef(null);
 
-  // Load Cloudflare Turnstile if the server has it configured.
+  const errId = useId();
+  const capsId = useId();
+
+  // Cloudflare Turnstile, when the server has it configured.
   useEffect(() => {
-    apiFetch('/api/auth/config').then(r => r.ok ? r.json() : {}).then(c => {
-      if (c.turnstileSiteKey) setSiteKey(c.turnstileSiteKey);
-    }).catch(() => {});
+    api('/api/auth/config').then((c) => { if (c?.turnstileSiteKey) setSiteKey(c.turnstileSiteKey); }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -54,7 +41,7 @@ export default function LoginPage() {
       if (!window.turnstile || !widgetRef.current || widgetId.current !== null) return;
       widgetId.current = window.turnstile.render(widgetRef.current, {
         sitekey: siteKey,
-        theme: 'dark',
+        theme: window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
         callback: (t) => setTurnstileToken(t),
         'expired-callback': () => setTurnstileToken(''),
         'error-callback': () => setTurnstileToken(''),
@@ -73,231 +60,179 @@ export default function LoginPage() {
     setTurnstileToken('');
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  useEffect(() => {
+    if (step === 'totp') codeRef.current?.focus();
+    else userRef.current?.focus();
+  }, [step]);
+
+  const submit = async (e, codeOverride) => {
+    e?.preventDefault();
+    if (loading) return;
     setError('');
     setLoading(true);
     try {
-      const res = step === 'password'
-        ? await apiFetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password, turnstileToken }),
-          })
-        : await apiFetch('/api/auth/totp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code }),
-          });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(data.error || 'Authentication failed');
-        setCode('');
-        if (step === 'password') resetTurnstile();
-        if (data.restart) { setStep('password'); setPassword(''); resetTurnstile(); }
+      const data = step === 'password'
+        ? await api('/api/auth/login', { method: 'POST', body: { username, password, turnstileToken } })
+        : await api('/api/auth/totp', { method: 'POST', body: { code: codeOverride ?? code } });
+      if (data.totpRequired) {
+        setPassword('');
+        setStep('totp');
         return;
       }
-      if (data.totpRequired) { setStep('totp'); setPassword(''); return; }
-      login(data);
-      navigate('/');
-    } catch {
-      setError('Connection refused — is the daemon running?');
+      login({ username: data.username });
+      navigate(location.state?.from || '/', { replace: true });
+    } catch (err) {
+      setError(err.message || 'Sign-in failed');
+      setCode('');
+      if (step === 'password') resetTurnstile();
+      // The server tells us when the 2FA step must start over.
+      if (step === 'totp' && /start again|expired|try again later/i.test(err.message)) {
+        setStep('password');
+        resetTurnstile();
+      }
+      if (step === 'totp') codeRef.current?.focus();
     } finally {
       setLoading(false);
     }
   };
 
+  const onCode = (v) => {
+    const digits = v.replace(/\D/g, '').slice(0, 6);
+    setCode(digits);
+    if (digits.length === 6) submit(null, digits);
+  };
+
+  const needsTurnstile = step === 'password' && siteKey && !turnstileToken;
+  const describedBy = [error ? errId : null, capsLock ? capsId : null].filter(Boolean).join(' ') || undefined;
+
   return (
-    <div style={{
-      position: 'fixed', inset: 0,
-      background: '#030005',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      overflow: 'hidden',
-      padding: '16px',
-    }}>
-      {/* Background glows */}
-      <div style={{ position: 'fixed', inset: 0, background: 'radial-gradient(ellipse 80% 60% at 50% 50%, rgba(90,0,0,0.45) 0%, transparent 70%)', pointerEvents: 'none', zIndex: 0 }} />
-      <div style={{ position: 'fixed', width: 'min(700px, 100vw)', height: 'min(700px, 100vw)', borderRadius: '50%', border: '1px solid rgba(100,0,0,0.1)', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', pointerEvents: 'none', zIndex: 0 }} />
-      <div style={{ position: 'fixed', width: 'min(480px, 80vw)', height: 'min(480px, 80vw)', borderRadius: '50%', border: '1px solid rgba(100,0,0,0.07)', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', pointerEvents: 'none', zIndex: 0 }} />
-
-      <BloodRain />
-
-      <div style={{ position: 'fixed', inset: 0, background: 'radial-gradient(ellipse at center, transparent 20%, rgba(0,0,0,0.9) 100%)', pointerEvents: 'none', zIndex: 1 }} />
-
-      {/* Card */}
-      <div style={{
-        position: 'relative', zIndex: 2,
-        width: '100%',
-        maxWidth: '400px',
-        background: 'rgba(4,0,6,0.97)',
-        border: '1px solid rgba(120,0,0,0.5)',
-        boxShadow: '0 0 0 1px rgba(60,0,0,0.2), 0 0 80px rgba(100,0,0,0.2), 0 0 160px rgba(60,0,0,0.1), inset 0 0 60px rgba(0,0,0,0.95)',
-        padding: 'clamp(28px, 5vw, 44px) clamp(20px, 5vw, 40px)',
-        fontFamily: '"JetBrains Mono", monospace',
-      }}>
-        {/* Corner brackets */}
-        {[
-          { top: 0, left: 0, borderWidth: '2px 0 0 2px' },
-          { top: 0, right: 0, borderWidth: '2px 2px 0 0' },
-          { bottom: 0, left: 0, borderWidth: '0 0 2px 2px' },
-          { bottom: 0, right: 0, borderWidth: '0 2px 2px 0' },
-        ].map((s, i) => (
-          <div key={i} style={{ position: 'absolute', width: 16, height: 16, borderStyle: 'solid', borderColor: 'rgba(160,0,0,0.75)', ...s }} />
-        ))}
-
-        {/* Skull */}
-        <div style={{ textAlign: 'center', marginBottom: '6px' }}>
-          <span style={{ fontSize: 'clamp(40px, 8vw, 52px)', lineHeight: 1, filter: 'drop-shadow(0 0 24px rgba(220,0,0,0.65))' }}>☠</span>
-        </div>
-
-        {/* Title */}
-        <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-          <h1 style={{
-            fontFamily: '"UnifrakturMaguntia", cursive',
-            fontSize: 'clamp(22px, 5vw, 30px)',
-            color: '#bb0000',
-            margin: '0 0 8px',
-            textShadow: '0 0 30px rgba(180,0,0,0.55), 0 0 60px rgba(120,0,0,0.25)',
-            letterSpacing: '0.04em',
-          }}>
-            {APP_TITLE}
-          </h1>
-          <p style={{ color: '#3a2030', fontSize: '10px', letterSpacing: '0.25em', margin: 0, textTransform: 'uppercase' }}>
-            ░ authenticate to proceed ░
+    <main className="auth">
+      <div className="auth-card">
+        <div className="auth-head">
+          <div className="brand-mark" aria-hidden="true"><Icon name="skull" size={26} /></div>
+          <h1>{step === 'totp' ? 'Two-factor verification' : `Sign in to ${APP_TITLE}`}</h1>
+          <p className="muted">
+            {step === 'totp'
+              ? 'Enter the 6-digit code from your authenticator app.'
+              : <>Server <span className="mono text-2">{SERVER_NAME}</span></>}
           </p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          {step === 'password' && (<>
-          <div>
-            <label style={{ display: 'block', fontSize: '9px', color: '#5a3040', letterSpacing: '0.2em', marginBottom: '6px', textTransform: 'uppercase' }}>
-              ▸ Identifier
-            </label>
-            <input
-              type="text"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              placeholder="username"
-              required
-              autoComplete="username"
-              style={{
-                width: '100%',
-                background: 'rgba(0,0,0,0.7)',
-                border: '1px solid rgba(100,0,0,0.4)',
-                borderBottom: '1px solid rgba(150,0,0,0.55)',
-                color: '#cc8888',
-                fontFamily: '"JetBrains Mono", monospace',
-                fontSize: '13px', padding: '10px 12px',
-                outline: 'none', transition: 'border-color 0.2s',
-                borderRadius: '2px',
-              }}
-              onFocus={e => e.target.style.borderColor = 'rgba(180,0,0,0.8)'}
-              onBlur={e => e.target.style.borderColor = 'rgba(100,0,0,0.4)'}
-            />
+        {expired && step === 'password' && !error && (
+          <div className="alert" data-tone="info" style={{ marginBottom: 16 }}>
+            <Icon name="info" size={18} />
+            <div>Your session ended. Please sign in again.</div>
           </div>
+        )}
 
-          <div>
-            <label style={{ display: 'block', fontSize: '9px', color: '#5a3040', letterSpacing: '0.2em', marginBottom: '6px', textTransform: 'uppercase' }}>
-              ▸ Passphrase
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••••"
-              required
-              autoComplete="current-password"
-              style={{
-                width: '100%',
-                background: 'rgba(0,0,0,0.7)',
-                border: '1px solid rgba(100,0,0,0.4)',
-                borderBottom: '1px solid rgba(150,0,0,0.55)',
-                color: '#cc8888',
-                fontFamily: '"JetBrains Mono", monospace',
-                fontSize: '13px', padding: '10px 12px',
-                outline: 'none', transition: 'border-color 0.2s',
-                borderRadius: '2px',
-              }}
-              onFocus={e => e.target.style.borderColor = 'rgba(180,0,0,0.8)'}
-              onBlur={e => e.target.style.borderColor = 'rgba(100,0,0,0.4)'}
-            />
-          </div>
-          </>)}
-
-          {step === 'totp' && (
-            <div>
-              <label style={{ display: 'block', fontSize: '9px', color: '#5a3040', letterSpacing: '0.2em', marginBottom: '6px', textTransform: 'uppercase' }}>
-                ▸ Authenticator code
-              </label>
+        <form className="auth-form" onSubmit={submit} noValidate>
+          {step === 'password' ? (
+            <>
+              <div className="field">
+                <label className="label" htmlFor="login-user">Username</label>
+                <input
+                  ref={userRef}
+                  id="login-user"
+                  className="input"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  required
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? errId : undefined}
+                />
+              </div>
+              <div className="field">
+                <label className="label" htmlFor="login-pass">Password</label>
+                <div className="input-wrap">
+                  <input
+                    id="login-pass"
+                    className="input"
+                    style={{ paddingRight: 48 }}
+                    type={showPw ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    onKeyUp={(e) => setCapsLock(e.getModifierState?.('CapsLock'))}
+                    onBlur={() => setCapsLock(false)}
+                    aria-invalid={error ? true : undefined}
+                    aria-describedby={describedBy}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-icon btn-sm input-end"
+                    onClick={() => setShowPw((v) => !v)}
+                    aria-label={showPw ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPw}
+                    style={{ background: 'transparent' }}
+                  >
+                    <Icon name={showPw ? 'eyeOff' : 'eye'} size={18} />
+                  </button>
+                </div>
+                {capsLock && <p id={capsId} className="hint tone-warn">Caps Lock is on.</p>}
+              </div>
+              {siteKey && <div ref={widgetRef} style={{ display: 'flex', justifyContent: 'center', minHeight: 65 }} />}
+            </>
+          ) : (
+            <div className="field">
+              <label className="label" htmlFor="login-code">Authentication code</label>
               <input
+                ref={codeRef}
+                id="login-code"
+                className="input otp-input"
                 type="text"
                 inputMode="numeric"
-                pattern="[0-9 ]*"
-                maxLength={7}
-                autoFocus
-                value={code}
-                onChange={e => setCode(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="000000"
-                required
                 autoComplete="one-time-code"
-                style={{
-                  width: '100%',
-                  background: 'rgba(0,0,0,0.7)',
-                  border: '1px solid rgba(100,0,0,0.4)',
-                  borderBottom: '1px solid rgba(150,0,0,0.55)',
-                  color: '#cc8888',
-                  fontFamily: '"JetBrains Mono", monospace',
-                  fontSize: '20px', letterSpacing: '0.4em', textAlign: 'center', padding: '10px 12px',
-                  outline: 'none', borderRadius: '2px',
-                }}
+                pattern="[0-9]{6}"
+                maxLength={6}
+                required
+                value={code}
+                onChange={(e) => onCode(e.target.value)}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? errId : undefined}
+                disabled={loading}
               />
-              <button type="button" onClick={() => { setStep('password'); setCode(''); setError(''); resetTurnstile(); }}
-                style={{ marginTop: '8px', background: 'none', border: 'none', color: '#5a3040', fontSize: '10px', cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>
-                ← back
-              </button>
             </div>
           )}
 
-          {siteKey && <div ref={widgetRef} style={{ display: step === 'password' ? 'flex' : 'none', justifyContent: 'center' }} />}
-
           {error && (
-            <div style={{
-              padding: '9px 12px',
-              background: 'rgba(140,0,0,0.1)',
-              border: '1px solid rgba(180,0,0,0.35)',
-              color: '#cc3333', fontSize: '11px',
-              borderRadius: '2px',
-            }}>
-              ✗ {error}
+            <div id={errId} className="alert" role="alert">
+              <Icon name="alert" size={18} />
+              <div>{error}</div>
             </div>
           )}
 
           <button
             type="submit"
-            disabled={loading || (step === 'password' && siteKey && !turnstileToken) || (step === 'totp' && code.length !== 6)}
-            style={{
-              marginTop: '6px', width: '100%', padding: '12px',
-              background: loading ? 'rgba(80,0,0,0.3)' : 'rgba(100,0,0,0.22)',
-              border: '1px solid rgba(160,0,0,0.55)',
-              color: '#bb0000', cursor: loading ? 'not-allowed' : 'pointer',
-              fontFamily: '"JetBrains Mono", monospace',
-              fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.22em',
-              transition: 'all 0.2s', borderRadius: '2px',
-            }}
-            onMouseEnter={e => { if (!loading) { e.target.style.background = 'rgba(120,0,0,0.38)'; e.target.style.color = '#ee2020'; } }}
-            onMouseLeave={e => { e.target.style.background = 'rgba(100,0,0,0.22)'; e.target.style.color = '#bb0000'; }}
+            className="btn btn-primary btn-block"
+            style={{ minHeight: 44 }}
+            disabled={loading || needsTurnstile || (step === 'password' ? !username || !password : code.length !== 6)}
+            aria-busy={loading || undefined}
           >
-            {loading ? '▒▒▒ verifying ▒▒▒' : step === 'totp' ? '▸ verify code' : '▸ enter the system'}
+            {loading && <span className="spinner" aria-hidden="true" />}
+            {loading ? 'Verifying…' : step === 'totp' ? 'Verify' : 'Sign in'}
           </button>
+
+          {step === 'totp' && (
+            <button
+              type="button"
+              className="link-btn"
+              style={{ alignSelf: 'center' }}
+              onClick={() => { setStep('password'); setCode(''); setError(''); resetTurnstile(); }}
+            >
+              <Icon name="chevronLeft" size={16} /> Use a different account
+            </button>
+          )}
         </form>
 
-        {/* Footer */}
-        <div style={{ marginTop: '22px', paddingTop: '14px', borderTop: '1px solid rgba(60,0,0,0.25)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>restricted</span>
-          <span style={{ color: '#2a1520', fontSize: '9px', letterSpacing: '0.1em' }}>secured</span>
-        </div>
+        <p className="auth-foot">
+          <Icon name="lock" size={14} /> Restricted system. Access is logged.
+        </p>
       </div>
-    </div>
+    </main>
   );
 }

@@ -1,124 +1,114 @@
-import { useState, useEffect, useCallback } from 'react';
-import { apiFetch } from '../App.jsx';
+import { useState } from 'react';
+import { api } from '../lib/api.js';
+import { usePolling } from '../lib/usePolling.js';
+import { usePageTitle } from '../lib/usePageTitle.js';
+import { duration } from '../lib/format.js';
+import { useConfirm } from '../components/ConfirmModal.jsx';
+import { useToast } from '../components/Toast.jsx';
+import Icon from '../components/Icon.jsx';
+import { Button, Empty, ErrorAlert, PageHeader, Status } from '../components/ui.jsx';
 
-const SERVICE_ICONS = {
-  nginx: '⬡', cloudflared: '☁', docker: '◈',
-  ssh: '🔑', ufw: '🛡', cron: '⏰',
+export function serviceTone(status) {
+  if (status === 'active') return 'ok';
+  if (status === 'failed') return 'danger';
+  if (status === 'activating' || status === 'deactivating' || status === 'reloading') return 'warn';
+  return 'idle';
+}
+export function serviceLabel(status) {
+  if (status === 'not-found') return 'Not installed';
+  return status ? status[0].toUpperCase() + status.slice(1) : 'Unknown';
+}
+
+// Stopping these can cut off access to this panel or take other things down.
+const RISKY = {
+  cloudflared: 'This panel is reached through cloudflared. Stopping it will disconnect you and you will not be able to come back remotely.',
+  ssh: 'Remote SSH logins will stop working until the service is started again.',
+  docker: 'Every running container will stop.',
+  nginx: 'Sites served by nginx will go offline.',
+  ufw: 'Changes the firewall state for the whole machine.',
 };
 
-function ServiceCard({ name, status, onAction, actioning }) {
-  const isActive = status === 'active';
-  const icon = SERVICE_ICONS[name] || '⚙';
+const PAST = { start: 'started', stop: 'stopped', restart: 'restarted' };
 
+function ServiceCard({ svc, busy, onAction }) {
+  const active = svc.status === 'active';
+  const missing = svc.status === 'not-found';
   return (
-    <div className="card bracket fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <span style={{ fontSize: '20px', opacity: 0.65, flexShrink: 0 }}>{icon}</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: 'Syne', fontWeight: 700, fontSize: '13px', letterSpacing: '0.05em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
-          <div style={{ fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.08em', marginTop: '2px' }}>systemd unit</div>
+    <li className="card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="row" style={{ alignItems: 'flex-start' }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h2 className="mono" style={{ fontSize: 'var(--fs-lg)', fontWeight: 600 }}>{svc.name}</h2>
+          <p className="muted truncate" style={{ fontSize: 'var(--fs-sm)' }} title={svc.description}>
+            {svc.description || 'systemd unit'}
+          </p>
         </div>
-        <span className={`badge badge-${isActive ? 'active' : 'inactive'}`}>
-          {isActive ? '● active' : '○ inactive'}
-        </span>
+        <Status tone={serviceTone(svc.status)}>{serviceLabel(svc.status)}</Status>
       </div>
-
-      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-        <button
-          className="btn btn-green"
-          disabled={!!actioning || isActive}
-          onClick={() => onAction(name, 'start')}
-          style={{ opacity: isActive ? 0.4 : 1 }}
-        >
-          {actioning === `${name}-start` ? <span className="spinner" /> : '▶ start'}
-        </button>
-        <button
-          className="btn btn-red"
-          disabled={!!actioning || !isActive}
-          onClick={() => onAction(name, 'stop')}
-          style={{ opacity: !isActive ? 0.4 : 1 }}
-        >
-          {actioning === `${name}-stop` ? <span className="spinner" /> : '■ stop'}
-        </button>
-        <button
-          className="btn btn-muted"
-          disabled={!!actioning}
-          onClick={() => onAction(name, 'restart')}
-        >
-          {actioning === `${name}-restart` ? <span className="spinner" /> : '↺ restart'}
-        </button>
+      <p className="muted" style={{ fontSize: 'var(--fs-xs)', minHeight: '1.5em' }}>
+        {active && svc.since ? <>Running for {duration((Date.now() - svc.since) / 1000)}{svc.sub && svc.sub !== 'running' ? ` · ${svc.sub}` : ''}</> : svc.sub && !missing ? `State: ${svc.sub}` : ''}
+      </p>
+      <div className="btn-group" role="group" aria-label={`${svc.name} actions`}>
+        <Button icon="play" className="btn-sm" disabled={active || missing || !!busy} busy={busy === 'start'} onClick={() => onAction(svc, 'start')}>
+          Start
+        </Button>
+        <Button icon="stop" className="btn-sm" disabled={!active || !!busy} busy={busy === 'stop'} onClick={() => onAction(svc, 'stop')}>
+          Stop
+        </Button>
+        <Button icon="restart" className="btn-sm" disabled={missing || !!busy} busy={busy === 'restart'} onClick={() => onAction(svc, 'restart')}>
+          Restart
+        </Button>
       </div>
-    </div>
+    </li>
   );
 }
 
 export default function ServicesPage() {
-  const [services, setServices] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [actioning, setActioning] = useState(null);
-  const [toast, setToast] = useState(null);
+  usePageTitle('Services');
+  const confirm = useConfirm();
+  const toast = useToast();
+  const [busy, setBusy] = useState({});
+  const { data, error, loading, refresh, setData } = usePolling((signal) => api('/api/services', { signal }), 10000);
 
-  const showToast = (msg, type = 'ok') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  const fetchServices = useCallback(async () => {
+  const onAction = async (svc, action) => {
+    const risk = RISKY[svc.name];
+    if (risk && action !== 'start') {
+      const ok = await confirm(`${action === 'stop' ? 'Stop' : 'Restart'} ${svc.name}?`, {
+        detail: risk, danger: true, confirmLabel: action === 'stop' ? 'Stop service' : 'Restart service',
+      });
+      if (!ok) return;
+    }
+    setBusy((b) => ({ ...b, [svc.name]: action }));
     try {
-      const r = await apiFetch('/api/services');
-      if (r.ok) setServices(await r.json());
-    } catch {} finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetchServices();
-    const iv = setInterval(fetchServices, 10000);
-    return () => clearInterval(iv);
-  }, [fetchServices]);
-
-  const handleAction = async (name, action) => {
-    setActioning(`${name}-${action}`);
-    try {
-      const r = await apiFetch(`/api/services/${name}/${action}`, { method: 'POST' });
-      const data = await r.json();
-      if (r.ok) {
-        setServices(prev => prev.map(s => s.name === name ? { ...s, status: data.status } : s));
-        showToast(`${name} ${action}ed — ${data.status}`);
-      } else {
-        showToast(data.error || 'Failed', 'err');
-      }
+      const res = await api(`/api/services/${encodeURIComponent(svc.name)}/${action}`, { method: 'POST' });
+      setData((list) => list?.map((s) => (s.name === svc.name ? { ...s, ...res } : s)));
+      toast.success(`${svc.name} ${PAST[action]} — now ${res.status}`);
     } catch (e) {
-      showToast(e.message, 'err');
+      toast.error(`${svc.name}: ${e.message}`);
     } finally {
-      setActioning(null);
+      setBusy((b) => { const n = { ...b }; delete n[svc.name]; return n; });
     }
   };
 
+  const list = data || [];
   return (
-    <div className="fade-in">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Services</h1>
-          <p className="page-subtitle">systemd service control</p>
-        </div>
-        <button className="btn btn-green" onClick={fetchServices} disabled={loading}>
-          {loading ? <span className="spinner" /> : '↻ refresh'}
-        </button>
+    <div className="page">
+      <PageHeader title="Services" subtitle="Start, stop and restart allow-listed systemd units">
+        <Button icon="refresh" onClick={refresh} busy={loading && !data}>Refresh</Button>
+      </PageHeader>
+      <div className="stack">
+        <ErrorAlert error={error} onRetry={refresh} />
+        {loading && !data ? (
+          <div className="grid grid-cards" aria-busy="true">
+            {[0, 1, 2, 3, 4, 5].map((i) => <div key={i} className="card skeleton" style={{ height: 156 }} />)}
+          </div>
+        ) : list.length === 0 ? (
+          !error && <Empty icon="services" title="No services configured">Set SERVICES in backend/.env.</Empty>
+        ) : (
+          <ul className="grid grid-cards list" aria-label="Services">
+            {list.map((s) => <ServiceCard key={s.name} svc={s} busy={busy[s.name]} onAction={onAction} />)}
+          </ul>
+        )}
       </div>
-
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: '60px 0' }}><span className="spinner" /></div>
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }}>
-          {services.map(s => (
-            <ServiceCard key={s.name} {...s} onAction={handleAction} actioning={actioning} />
-          ))}
-        </div>
-      )}
-
-      {toast && (
-        <div className={`toast toast-${toast.type}`}>{toast.msg}</div>
-      )}
     </div>
   );
 }

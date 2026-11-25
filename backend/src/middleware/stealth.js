@@ -68,7 +68,11 @@ function assetGate(distPath) {
       console.error('[stealth] cannot read build manifest — serving no private assets:', e.message);
       publicAssets = publicAssets || new Set();
     }
-    if (publicAssets.has(req.path)) return next(); // login bundle: cacheable
+    if (publicAssets.has(req.path)) {
+      // Login bundle: content-hashed file names, safe to cache forever.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return next();
+    }
     noStore(res); // private chunk: never cached anywhere
     if (req.session?.userId) return next();
     return res.status(404).end();

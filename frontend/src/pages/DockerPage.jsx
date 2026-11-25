@@ -1,160 +1,183 @@
-import { useState, useEffect, useCallback } from 'react';
-import { apiFetch } from '../App.jsx';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { api } from '../lib/api.js';
+import { usePolling } from '../lib/usePolling.js';
+import { usePageTitle } from '../lib/usePageTitle.js';
 import { useConfirm } from '../components/ConfirmModal.jsx';
+import { useToast } from '../components/Toast.jsx';
+import Icon from '../components/Icon.jsx';
+import { Button, Empty, ErrorAlert, PageHeader, Status } from '../components/ui.jsx';
 
-function Toast({ toast }) {
-  if (!toast) return null;
-  return <div className={`toast toast-${toast.type}`}>{toast.msg}</div>;
-}
+const stateTone = (s) => (s === 'running' ? 'ok' : s === 'restarting' || s === 'paused' ? 'warn' : s === 'dead' ? 'danger' : 'idle');
+const PAST = { start: 'started', stop: 'stopped', restart: 'restarted', remove: 'removed' };
 
-function ContainerCard({ c, links, actioning, onAction }) {
-  const isRunning = c.state === 'running';
+function SearchBox({ value, onChange, label }) {
   return (
-    <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ color: 'var(--text)', fontSize: '12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
-          <div style={{ color: 'var(--muted)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '2px' }}>{c.image}</div>
-        </div>
-        <span className={`badge badge-${isRunning ? 'running' : 'exited'}`}>{c.state}</span>
-      </div>
-      {c.ports && c.ports !== '—' && (
-        <div style={{ color: 'var(--muted)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.ports}</div>
-      )}
-      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-        {!isRunning && (
-          <button className="btn btn-green" style={{ padding: '3px 9px' }} disabled={!!actioning} onClick={() => onAction(c.id, c.name, 'start')}>
-            {actioning === `${c.id}-start` ? <span className="spinner" /> : '▶ start'}
-          </button>
-        )}
-        {isRunning && (
-          <button className="btn btn-red" style={{ padding: '3px 9px' }} disabled={!!actioning} onClick={() => onAction(c.id, c.name, 'stop')}>
-            {actioning === `${c.id}-stop` ? <span className="spinner" /> : '■ stop'}
-          </button>
-        )}
-        <button className="btn btn-muted" style={{ padding: '3px 9px' }} disabled={!!actioning} onClick={() => onAction(c.id, c.name, 'restart')}>
-          {actioning === `${c.id}-restart` ? <span className="spinner" /> : '↺'}
-        </button>
-        <button className="btn btn-red" style={{ padding: '3px 9px' }} disabled={!!actioning}
-          onClick={async () => { if (await confirm(`Remove "${c.name}"?`, { detail: 'This will force-remove the container.', danger: true })) onAction(c.id, c.name, 'remove'); }}>
-          {actioning === `${c.id}-remove` ? <span className="spinner" /> : '✕'}
-        </button>
-        {links[c.name] && (
-          <a href={links[c.name]} target="_blank" rel="noopener noreferrer" className="btn btn-muted" style={{ padding: '3px 9px', textDecoration: 'none' }}>↗</a>
-        )}
-      </div>
+    <div className="input-wrap search">
+      <Icon name="search" size={16} className="input-icon" />
+      <input
+        className="input"
+        type="search"
+        aria-label={label}
+        placeholder={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
     </div>
   );
 }
 
-function ContainersTab({ onToast }) {
-  const confirm = useConfirm();
-  const [links, setLinks] = useState({});
-  const [containers, setContainers] = useState([]);
+function LogsDialog({ container, onClose }) {
+  const ref = useRef(null);
+  const preRef = useRef(null);
+  const titleId = useId();
+  const [logs, setLogs] = useState('');
+  const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [actioning, setActioning] = useState(null);
-  const [view, setView] = useState('table');
 
-  const fetchData = useCallback(async () => {
+  const load = async () => {
     setLoading(true);
     try {
-      const [r, rl] = await Promise.all([
-        apiFetch('/api/docker/containers'),
-        apiFetch('/api/container-links'),
-      ]);
-      if (r.ok) setContainers(await r.json());
-      if (rl.ok) setLinks(await rl.json());
-    } catch {} finally { setLoading(false); }
+      const { logs: text } = await api(`/api/docker/containers/${container.id}/logs?tail=500`);
+      setLogs(text);
+      setError(null);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    ref.current?.showModal();
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const iv = setInterval(fetchData, 10000);
-    return () => clearInterval(iv);
-  }, [fetchData]);
-
-  const doAction = async (id, name, action) => {
-    const key = `${id}-${action}`;
-    setActioning(key);
-    try {
-      const r = await apiFetch(`/api/docker/containers/${id}/${action}`, { method: 'POST' });
-      const data = await r.json();
-      if (r.ok) { onToast(`${name}: ${action}${action === 'remove' ? 'd' : 'ed'}`); await fetchData(); }
-      else onToast(data.error || 'Failed', 'err');
-    } catch (e) { onToast(e.message, 'err'); }
-    finally { setActioning(null); }
-  };
-
-  if (loading) return <div style={{ textAlign: 'center', padding: '60px 0' }}><span className="spinner" /></div>;
+    const pre = preRef.current;
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  }, [logs]);
 
   return (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
-        <span style={{ color: 'var(--muted)', fontSize: '11px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-          {containers.length} containers
-        </span>
-        <div style={{ display: 'flex', gap: '6px' }}>
-          <button className="btn btn-ghost" onClick={() => setView(v => v === 'table' ? 'cards' : 'table')} style={{ fontSize: '10px' }}>
-            {view === 'table' ? '▦ cards' : '≡ table'}
-          </button>
-          <button className="btn btn-green" onClick={fetchData}>↻ refresh</button>
-        </div>
+    <dialog
+      ref={ref}
+      className="dialog dialog-lg"
+      aria-labelledby={titleId}
+      onClose={onClose}
+      onClick={(e) => { if (e.target === ref.current) ref.current.close(); }}
+    >
+      <div className="dialog-head">
+        <Icon name="logs" size={18} />
+        <h2 id={titleId} className="truncate">Logs · <span className="mono">{container.name}</span></h2>
+        <span className="spacer" />
+        <Button icon="refresh" className="btn-sm" busy={loading} onClick={load}>Reload</Button>
+        <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => ref.current.close()} aria-label="Close logs">
+          <Icon name="x" size={18} />
+        </button>
       </div>
-
-      {containers.length === 0 ? (
-        <p style={{ textAlign: 'center', color: 'var(--muted)', padding: '40px', fontSize: '13px', margin: 0 }}>No containers found</p>
-      ) : view === 'cards' ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '10px' }}>
-          {containers.map(c => (
-            <ContainerCard key={c.id} c={c} links={links} actioning={actioning} onAction={doAction} />
-          ))}
-        </div>
+      {error ? (
+        <div style={{ padding: 20 }}><ErrorAlert error={error} onRetry={load} /></div>
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="table-wrap">
-            <table className="data-table">
+        <pre ref={preRef} className="logs" tabIndex={0} aria-label={`Last 500 log lines of ${container.name}`} aria-busy={loading}>
+          {logs || (loading ? 'Loading…' : 'No log output.')}
+        </pre>
+      )}
+    </dialog>
+  );
+}
+
+function ContainersTab({ data, error, loading, refresh }) {
+  const confirm = useConfirm();
+  const toast = useToast();
+  const [filter, setFilter] = useState('');
+  const [busy, setBusy] = useState({});
+  const [logsFor, setLogsFor] = useState(null);
+
+  const list = data?.list || [];
+  const links = data?.links || {};
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? list.filter((c) => `${c.name} ${c.image} ${c.state}`.toLowerCase().includes(q)) : list;
+  }, [list, filter]);
+
+  const act = async (c, action) => {
+    if (action === 'remove') {
+      const ok = await confirm(`Remove container “${c.name}”?`, {
+        detail: 'The container is force-removed, even if running. Its image and named volumes are kept.',
+        danger: true, confirmLabel: 'Remove container',
+      });
+      if (!ok) return;
+    }
+    setBusy((b) => ({ ...b, [c.id]: action }));
+    try {
+      await api(`/api/docker/containers/${c.id}/${action}`, { method: 'POST' });
+      toast.success(`${c.name} ${PAST[action]}`);
+      await refresh();
+    } catch (e) {
+      toast.error(`${c.name}: ${e.message}`);
+    } finally {
+      setBusy((b) => { const n = { ...b }; delete n[c.id]; return n; });
+    }
+  };
+
+  return (
+    <div className="stack">
+      <div className="row wrap">
+        <SearchBox value={filter} onChange={setFilter} label="Filter containers" />
+        <span className="spacer" />
+        <span className="muted" role="status" style={{ fontSize: 'var(--fs-sm)' }}>
+          {filter ? `${shown.length} of ${list.length} containers` : `${list.length} containers`}
+        </span>
+      </div>
+      <ErrorAlert error={error} onRetry={refresh} />
+      {loading && !data ? <div className="card skeleton" style={{ height: 240 }} /> : shown.length === 0 ? (
+        !error && <div className="card"><Empty icon="docker" title={filter ? 'No matching containers' : 'No containers yet'} /></div>
+      ) : (
+        <div className="card card-pad-0">
+          <div className="table-scroll">
+            <table className="table table-responsive">
+              <caption className="sr-only">Docker containers</caption>
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th className="hide-sm">Image</th>
-                  <th>State</th>
-                  <th className="hide-md">Status</th>
-                  <th className="hide-md">Ports</th>
-                  <th>Actions</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">State</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Ports</th>
+                  <th scope="col" className="actions"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
-                {containers.map(c => {
-                  const isRunning = c.state === 'running';
+                {shown.map((c) => {
+                  const running = c.state === 'running';
+                  const b = busy[c.id];
                   return (
                     <tr key={c.id}>
-                      <td style={{ color: 'var(--text)', fontWeight: 500 }}>{c.name}</td>
-                      <td className="hide-sm" style={{ color: 'var(--muted)', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.image}</td>
-                      <td><span className={`badge badge-${isRunning ? 'running' : 'exited'}`}>{c.state}</span></td>
-                      <td className="hide-md" style={{ color: 'var(--muted)', fontSize: '11px' }}>{c.status}</td>
-                      <td className="hide-md" style={{ color: 'var(--muted)', fontSize: '11px', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.ports || '—'}</td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                          {!isRunning && (
-                            <button className="btn btn-green" style={{ padding: '2px 8px' }} disabled={!!actioning} onClick={() => doAction(c.id, c.name, 'start')}>
-                              {actioning === `${c.id}-start` ? <span className="spinner" /> : '▶'}
-                            </button>
+                      <td className="cell-primary">
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 600 }} className="truncate">{c.name}</div>
+                          <div className="muted mono truncate" style={{ fontSize: 'var(--fs-xs)', maxWidth: 360 }}>{c.image}</div>
+                        </div>
+                      </td>
+                      <td data-label="State"><Status tone={stateTone(c.state)}>{c.state}</Status></td>
+                      <td data-label="Status" className="muted">{c.status}</td>
+                      <td data-label="Ports" className="mono muted" style={{ fontSize: 'var(--fs-xs)', maxWidth: 260, overflowWrap: 'anywhere' }}>
+                        {c.ports || '—'}
+                      </td>
+                      <td className="actions">
+                        <div className="btn-group" role="group" aria-label={`${c.name} actions`}>
+                          {running ? (
+                            <Button icon="stop" className="btn-sm" busy={b === 'stop'} disabled={!!b} onClick={() => act(c, 'stop')}>Stop</Button>
+                          ) : (
+                            <Button icon="play" className="btn-sm" busy={b === 'start'} disabled={!!b} onClick={() => act(c, 'start')}>Start</Button>
                           )}
-                          {isRunning && (
-                            <button className="btn btn-red" style={{ padding: '2px 8px' }} disabled={!!actioning} onClick={() => doAction(c.id, c.name, 'stop')}>
-                              {actioning === `${c.id}-stop` ? <span className="spinner" /> : '■'}
-                            </button>
-                          )}
-                          <button className="btn btn-muted" style={{ padding: '2px 8px' }} disabled={!!actioning} onClick={() => doAction(c.id, c.name, 'restart')}>
-                            {actioning === `${c.id}-restart` ? <span className="spinner" /> : '↺'}
-                          </button>
-                          <button className="btn btn-red" style={{ padding: '2px 8px' }} disabled={!!actioning}
-                            onClick={async () => { if (await confirm(`Remove "${c.name}"?`, { detail: 'This will force-remove the container.', danger: true })) doAction(c.id, c.name, 'remove'); }}>
-                            {actioning === `${c.id}-remove` ? <span className="spinner" /> : '✕'}
-                          </button>
+                          <Button icon="restart" className="btn-sm btn-icon" busy={b === 'restart'} disabled={!!b} onClick={() => act(c, 'restart')} aria-label={`Restart ${c.name}`} title="Restart" />
+                          <Button icon="logs" className="btn-sm btn-icon" onClick={() => setLogsFor(c)} aria-label={`View logs for ${c.name}`} title="Logs" />
                           {links[c.name] && (
-                            <a href={links[c.name]} target="_blank" rel="noopener noreferrer" className="btn btn-muted" style={{ padding: '2px 8px', textDecoration: 'none' }}>↗</a>
+                            <a href={links[c.name]} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-icon" aria-label={`Open ${c.name} in a new tab`} title="Open">
+                              <Icon name="external" size={16} />
+                            </a>
                           )}
+                          <Button icon="trash" className="btn-sm btn-icon btn-danger-soft" busy={b === 'remove'} disabled={!!b} onClick={() => act(c, 'remove')} aria-label={`Remove ${c.name}`} title="Remove" />
                         </div>
                       </td>
                     </tr>
@@ -165,83 +188,79 @@ function ContainersTab({ onToast }) {
           </div>
         </div>
       )}
-    </>
+      {logsFor && <LogsDialog container={logsFor} onClose={() => setLogsFor(null)} />}
+    </div>
   );
 }
 
-function ImagesTab({ onToast }) {
+function ImagesTab({ data, error, loading, refresh }) {
   const confirm = useConfirm();
-  const [images, setImages] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [removing, setRemoving] = useState(null);
+  const toast = useToast();
+  const [filter, setFilter] = useState('');
+  const [busy, setBusy] = useState(null);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  const list = data || [];
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? list.filter((i) => `${i.repo}:${i.tag} ${i.id}`.toLowerCase().includes(q)) : list;
+  }, [list, filter]);
+
+  const remove = async (img) => {
+    const label = img.repo === '<none>' ? img.id : `${img.repo}:${img.tag}`;
+    const ok = await confirm(`Delete image ${label}?`, {
+      detail: 'The image is removed from disk. Docker refuses if a container still uses it.',
+      danger: true, confirmLabel: 'Delete image',
+    });
+    if (!ok) return;
+    setBusy(img.id);
     try {
-      const r = await apiFetch('/api/docker/images');
-      if (r.ok) setImages(await r.json());
-    } catch {} finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const iv = setInterval(fetchData, 10000);
-    return () => clearInterval(iv);
-  }, [fetchData]);
-
-  const remove = async (id, label) => {
-    if (!await confirm(`Remove image "${label}"?`, { detail: 'This will delete the image from disk.', danger: true })) return;
-    setRemoving(id);
-    try {
-      const r = await apiFetch(`/api/docker/images/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      const data = await r.json();
-      if (r.ok) { onToast(`Image ${label} removed`); await fetchData(); }
-      else onToast(data.error || 'Failed', 'err');
-    } catch (e) { onToast(e.message, 'err'); }
-    finally { setRemoving(null); }
+      await api(`/api/docker/images/${encodeURIComponent(img.repo === '<none>' ? img.id : label)}`, { method: 'DELETE' });
+      toast.success(`Deleted ${label}`);
+      await refresh();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(null);
+    }
   };
 
-  if (loading) return <div style={{ textAlign: 'center', padding: '60px 0' }}><span className="spinner" /></div>;
-
   return (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-        <span style={{ color: 'var(--muted)', fontSize: '11px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-          {images.length} images
-        </span>
-        <button className="btn btn-green" onClick={fetchData}>↻ refresh</button>
+    <div className="stack">
+      <div className="row wrap">
+        <SearchBox value={filter} onChange={setFilter} label="Filter images" />
+        <span className="spacer" />
+        <span className="muted" role="status" style={{ fontSize: 'var(--fs-sm)' }}>{shown.length} images</span>
       </div>
-
-      {images.length === 0 ? (
-        <p style={{ textAlign: 'center', color: 'var(--muted)', padding: '40px', fontSize: '13px', margin: 0 }}>No images found</p>
+      <ErrorAlert error={error} onRetry={refresh} />
+      {loading && !data ? <div className="card skeleton" style={{ height: 240 }} /> : shown.length === 0 ? (
+        !error && <div className="card"><Empty icon="docker" title="No images" /></div>
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="table-wrap">
-            <table className="data-table">
+        <div className="card card-pad-0">
+          <div className="table-scroll">
+            <table className="table table-responsive">
+              <caption className="sr-only">Docker images</caption>
               <thead>
                 <tr>
-                  <th>Repository</th>
-                  <th>Tag</th>
-                  <th className="hide-sm">ID</th>
-                  <th className="hide-md">Size</th>
-                  <th className="hide-md">Created</th>
-                  <th>Action</th>
+                  <th scope="col">Repository</th>
+                  <th scope="col">Tag</th>
+                  <th scope="col">Image ID</th>
+                  <th scope="col" className="r">Size</th>
+                  <th scope="col">Created</th>
+                  <th scope="col" className="actions"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
-                {images.map(img => (
-                  <tr key={img.id}>
-                    <td style={{ color: 'var(--text)' }}>{img.repo}</td>
-                    <td><span className="badge badge-inactive">{img.tag}</span></td>
-                    <td className="hide-sm" style={{ color: 'var(--muted)' }}>{img.id}</td>
-                    <td className="hide-md" style={{ color: 'var(--muted)' }}>{img.size}</td>
-                    <td className="hide-md" style={{ color: 'var(--muted)', fontSize: '11px' }}>{img.created}</td>
-                    <td>
-                      <button className="btn btn-red" style={{ padding: '2px 8px' }}
-                        disabled={!!removing}
-                        onClick={() => remove(img.id, `${img.repo}:${img.tag}`)}>
-                        {removing === img.id ? <span className="spinner" /> : '✕ remove'}
-                      </button>
+                {shown.map((img) => (
+                  <tr key={`${img.id}-${img.repo}-${img.tag}`}>
+                    <td className="cell-primary" style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{img.repo}</td>
+                    <td data-label="Tag"><span className="chip">{img.tag}</span></td>
+                    <td data-label="Image ID" className="mono muted">{img.id}</td>
+                    <td data-label="Size" className="r num">{img.size}</td>
+                    <td data-label="Created" className="muted">{img.created}</td>
+                    <td className="actions">
+                      <Button icon="trash" className="btn-sm btn-danger-soft" busy={busy === img.id} disabled={!!busy} onClick={() => remove(img)}>
+                        Delete
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -250,48 +269,76 @@ function ImagesTab({ onToast }) {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
 
-export default function DockerPage() {
-  const [tab, setTab] = useState('containers');
-  const [toast, setToast] = useState(null);
+const TABS = [
+  { id: 'containers', label: 'Containers' },
+  { id: 'images', label: 'Images' },
+];
 
-  const showToast = (msg, type = 'ok') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
+export default function DockerPage() {
+  usePageTitle('Docker');
+  const [tab, setTab] = useState('containers');
+  const tabRefs = useRef({});
+  const baseId = useId();
+
+  const containers = usePolling(async (signal) => {
+    const [list, links] = await Promise.all([
+      api('/api/docker/containers', { signal }),
+      api('/api/container-links', { signal }).catch(() => ({})),
+    ]);
+    return { list, links };
+  }, 10000);
+  const images = usePolling((signal) => api('/api/docker/images', { signal }), 30000, { enabled: tab === 'images' });
+
+  const counts = { containers: containers.data?.list.length, images: images.data?.length };
+
+  // WAI-ARIA tabs: arrow keys move between tabs.
+  const onKeyDown = (e) => {
+    const i = TABS.findIndex((t) => t.id === tab);
+    let next = null;
+    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length];
+    if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length];
+    if (e.key === 'Home') next = TABS[0];
+    if (e.key === 'End') next = TABS[TABS.length - 1];
+    if (next) {
+      e.preventDefault();
+      setTab(next.id);
+      tabRefs.current[next.id]?.focus();
+    }
   };
 
-  return (
-    <div className="fade-in">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Docker</h1>
-          <p className="page-subtitle">container & image management</p>
-        </div>
-      </div>
+  const active = tab === 'containers' ? containers : images;
 
-      {/* Tab switcher */}
-      <div style={{ display: 'flex', gap: '4px', marginBottom: '16px' }}>
-        {['containers', 'images'].map(t => (
+  return (
+    <div className="page">
+      <PageHeader title="Docker" subtitle="Containers and images on this host">
+        <Button icon="refresh" onClick={active.refresh}>Refresh</Button>
+      </PageHeader>
+      <div className="tabs" role="tablist" aria-label="Docker resources" onKeyDown={onKeyDown} style={{ marginBottom: 16 }}>
+        {TABS.map((t) => (
           <button
-            key={t}
-            className="btn"
-            onClick={() => setTab(t)}
-            style={{
-              color: tab === t ? 'var(--green)' : 'var(--muted)',
-              borderColor: tab === t ? 'rgba(0,232,162,0.35)' : 'var(--border)',
-              background: tab === t ? 'rgba(0,232,162,0.06)' : 'transparent',
-            }}
+            key={t.id}
+            ref={(el) => { tabRefs.current[t.id] = el; }}
+            type="button"
+            role="tab"
+            id={`${baseId}-tab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls={`${baseId}-panel-${t.id}`}
+            tabIndex={tab === t.id ? 0 : -1}
+            className="tab"
+            onClick={() => setTab(t.id)}
           >
-            {t === 'containers' ? '◈ containers' : '▨ images'}
+            {t.label}
+            {counts[t.id] != null && <span className="count">{counts[t.id]}</span>}
           </button>
         ))}
       </div>
-
-      {tab === 'containers' ? <ContainersTab onToast={showToast} /> : <ImagesTab onToast={showToast} />}
-      <Toast toast={toast} />
+      <div role="tabpanel" id={`${baseId}-panel-${tab}`} aria-labelledby={`${baseId}-tab-${tab}`}>
+        {tab === 'containers' ? <ContainersTab {...containers} /> : <ImagesTab {...images} />}
+      </div>
     </div>
   );
 }

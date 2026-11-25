@@ -3,7 +3,7 @@
 A self-hosted web panel to monitor and control a Linux server remotely, from desktop or mobile.
 Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudflare.
 
-![Version](https://img.shields.io/badge/version-2.0.0-00e8a2?style=flat-square&labelColor=0a0a0a)
+![Version](https://img.shields.io/badge/version-2.1.0-00e8a2?style=flat-square&labelColor=0a0a0a)
 ![Stack](https://img.shields.io/badge/stack-Node.js_+_React-00e8a2?style=flat-square&labelColor=0a0a0a)
 ![License](https://img.shields.io/badge/license-MIT-00e8a2?style=flat-square&labelColor=0a0a0a)
 
@@ -16,10 +16,10 @@ Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudf
 ## Features
 
 - **System stats** — live CPU, RAM, disk, uptime and temperature
-- **Docker** — start / stop / restart / remove containers, manage images, optional per-container links
-- **Services** — control an allow-list of systemd services
+- **Docker** — start / stop / restart / remove containers, view logs, manage images, optional per-container links
+- **Services** — control an allow-list of systemd services (configurable with `SERVICES`)
 - **Processes** — browse and kill processes
-- **Web terminal** — full bash session over WebSocket (xterm.js + node-pty)
+- **Web terminal** — real shells over WebSocket (xterm.js + node-pty): tabs, auto-reconnect, sessions that survive dropped connections and reloads, search, copy/paste, on-screen keys for phones, screen-reader mode
 - **Push notifications** — server online/restarting, high CPU/RAM, container crashes, failed services, **new logins and lockouts**
 - **PWA** — installable on mobile; optional Cloudflare Worker offline page
 - **Security built in** — 2FA (TOTP), brute-force lockout, rate limiting, Cloudflare Turnstile, optional Cloudflare Access, hidden API surface
@@ -31,7 +31,7 @@ Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudf
 | Layer | Tech |
 |---|---|
 | Backend | Node.js, Express, SQLite (Sequelize), ws, node-pty |
-| Frontend | React, Vite, xterm.js |
+| Frontend | React, Vite, xterm.js, self-hosted Inter + JetBrains Mono |
 | Security | helmet, express-rate-limit, TOTP (RFC 6238), Cloudflare Turnstile / Access (jose) |
 | Notifications | Web Push (`web-push`) |
 | Hosting | systemd + Cloudflare Tunnel (recommended) |
@@ -58,8 +58,8 @@ Dark terminal aesthetic, installable as a PWA, built to sit safely behind Cloudf
 │       │   └── stealth.js         # Hides protected API + dashboard code from anonymous users
 │       ├── models/                # User, PushSubscription
 │       ├── routes/                # auth, docker, services, processes, stats, system, push
-│       ├── services/              # notifications, totp
-│       └── websocket/terminal.js  # Web terminal
+│       ├── services/              # metrics (/proc), procs, run (execFile), notifications, totp
+│       └── websocket/terminal.js  # Web terminal (PTY sessions, reattach, heartbeat)
 ├── frontend/
 │   ├── .env.example
 │   ├── public/                    # manifest, service worker
@@ -120,7 +120,8 @@ The panel listens on `PORT` (default `3000`).
 # /etc/systemd/system/serverctrl.service
 [Unit]
 Description=ServerCtrl
-After=network.target
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -145,7 +146,7 @@ sudo visudo -f /etc/sudoers.d/serverctrl
 ```
 ```
 <your-user> ALL=(root) NOPASSWD: /usr/bin/systemctl start nginx, /usr/bin/systemctl stop nginx, /usr/bin/systemctl restart nginx
-# …repeat for each service in ALLOWED_SERVICES (backend/src/routes/services.js)
+# …repeat for each service listed in SERVICES (backend/.env)
 <your-user> ALL=(root) NOPASSWD: /usr/sbin/shutdown -r now, /usr/sbin/shutdown -h now
 ```
 
@@ -159,13 +160,19 @@ sudo visudo -f /etc/sudoers.d/serverctrl
 |---|---|---|
 | `SESSION_SECRET` | ✅ | ≥ 32 random chars. The server refuses to start in production without it |
 | `PORT` | | Default `3000` |
-| `BIND_HOST` | | Interface to listen on (default `0.0.0.0`). Use `127.0.0.1` if your tunnel runs on the host |
+| `BIND_HOST` | | Comma-separated addresses to listen on, one listener each (default `0.0.0.0`). E.g. `127.0.0.1,172.17.0.1,100.x.y.z` = localhost, the Docker bridge cloudflared dials, Tailscale — keeps the panel off your LAN. An address that isn't up yet is retried every 10 s while the others serve |
 | `SERVER_NAME` | | Name used in notifications and the 2FA app entry |
 | `SESSION_HOURS` | | Login lifetime, default `12` |
 | `ALLOWED_ORIGINS` | | Extra allowed browser origins (same host is always allowed) |
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | | Enables Cloudflare Turnstile on the login form |
-| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | | Enables Cloudflare Access token verification on every request |
+| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | | Enables Cloudflare Access token verification (signature, issuer, audience, expiry; fails closed if the signing keys can't be fetched) |
+| `ACCESS_ALLOWED_EMAILS` | | Optional: the Access token's email must be one of these |
+| `ACCESS_EXEMPT_LOCAL` | | Listener addresses that skip the Access check because they never see Cloudflare traffic (e.g. `127.0.0.1,<tailscale-ip>`). App login + 2FA still apply. Decided by the address a connection arrived on, never by headers |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | | Optional; auto-generated into `backend/data/vapid.json` |
+| `SERVICES` | | Comma-separated systemd units shown on the Services page (default `nginx,cloudflared,docker,ssh,ufw,cron`) |
+| `TERMINAL_MAX_SESSIONS` | | Shells one user may keep open, default `6` |
+| `TERMINAL_DETACH_MINUTES` | | How long a shell keeps running after its browser disconnects, default `15` |
+| `TERMINAL_SHELL` | | Shell to start, default `$SHELL` or `/bin/bash` (started as a login shell) |
 
 ### `frontend/.env` (rebuild after changing)
 
@@ -186,22 +193,23 @@ What's built in:
 | Protection | Details |
 |---|---|
 | **2FA (TOTP)** | Password + 6-digit code. Codes can't be replayed; wrong codes count toward lockout |
-| **Brute-force protection** | 5 failed logins / 15 min per IP, plus per-account lockout (15 min, doubling up to 24 h) that also stops attacks from rotating IPs |
+| **Brute-force protection** | 5 failed logins / 15 min per IP, plus per-account lockout (15 min, doubling up to 24 h) that also stops attacks from rotating IPs. `CF-Connecting-IP` is only trusted on tunnel listeners, so it can't be forged to dodge the limit |
 | **Rate limiting** | 300 API requests / min per IP; real client IP read from `CF-Connecting-IP` |
 | **Bot protection** | Cloudflare Turnstile on login (when keys are set) |
 | **Sessions** | `HttpOnly`, `Secure`, `SameSite=Strict`, new session id at login, server-side store |
 | **CSRF / WebSocket hijacking** | Origin checks on all state-changing requests and on the terminal WebSocket; JSON-only API |
 | **Hidden attack surface** | Anonymous users get `404` on every protected API route, and the dashboard code is only served after login |
 | **Headers** | Strict CSP, HSTS, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `noindex` |
-| **Terminal hygiene** | App secrets stripped from the shell environment; max 3 terminals per user; every session logged |
+| **Terminal hygiene** | App secrets stripped from the shell environment; per-user shell limit; shells bound to their login and killed on logout or session expiry; every session logged |
 | **Alerts** | Push notification on each successful login, lockout and repeated 2FA failure |
 
 Recommended deployment:
 1. **Use HTTPS only** — e.g. a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) so no port is opened on your router.
 2. **Enable 2FA** (`npm run setup-2fa`) and use a long unique password.
 3. **Cloudflare (free plan)**: Turnstile keys, *Always Use HTTPS*, HSTS, Bot Fight Mode, and a WAF rate-limit rule on `/api/auth/login`. Set *Browser Cache TTL* to "Respect existing headers".
-4. **Optional:** put the hostname behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) and set `CF_ACCESS_*` — requests without a valid Access token are then rejected even if someone reaches the origin directly.
-5. Bind to the interface your tunnel uses (`BIND_HOST`) or firewall the port from your LAN.
+4. **Optional:** put the hostname behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) and set `CF_ACCESS_*` — requests without a valid Access token are then rejected even if someone reaches the origin directly. Set `ACCESS_ALLOWED_EMAILS` to pin it to your account, and `ACCESS_EXEMPT_LOCAL` for a Tailscale/localhost listener that doesn't go through Cloudflare.
+5. Bind only to the addresses you need (`BIND_HOST`) so the port isn't reachable from your LAN.
+6. If a Cloudflare Worker runs on the panel's hostname (e.g. the offline page), add a route `<host>/ws/*` with **Workers: None** — proxying the terminal WebSocket through a Worker dropped every keystroke.
 
 Maintenance commands:
 ```bash
@@ -235,6 +243,15 @@ paste the file, deploy, and add the route `your-domain.com/*`.
 
 ## Changelog
 
+### v2.1.0 — Terminal rebuild and redesign
+- **Access and binding:** `BIND_HOST` takes several addresses (one listener each, retried independently, so a missing Tailscale interface never takes down the tunnel listener). Cloudflare Access verification hardened: cached signing keys with one refresh on key rotation, fail closed, `exp`/`iat`/issuer/audience required, optional email allow-list, and per-listener exemption for Tailscale/localhost. `CF-Connecting-IP` trusted only on tunnel listeners.
+- **Terminal rebuilt from scratch.** Dedicated `/ws/terminal` endpoint with binary I/O, output batching and backpressure, and heartbeats so idle shells survive Cloudflare's 100 s timeout. Shells outlive the browser connection (`TERMINAL_DETACH_MINUTES`) and reattach with their recent output after a reload, sleep or network drop. Tabs, search, copy/paste, font size, full screen, on-screen keys (Esc, Ctrl, Alt, arrows…) for phones, screen-reader mode. Correct sizing from the first frame (the old one stayed at 80×24 and measured the font before it loaded).
+- **New interface.** One design system with accessible contrast (WCAG AA), visible focus, keyboard support throughout, screen-reader labels and live announcements, reduced-motion support and an automatic light theme. Self-hosted fonts (no Google Fonts).
+- **Faster backend.** Stats are read from `/proc` and `/sys` and shared between all clients instead of running `top`/`df` every few seconds; processes show current CPU (like `top`) rather than a lifetime average; all commands run through `execFile` with no shell.
+- **Fixes.** CPU temperature now comes from the CPU sensor (it was reading the Wi-Fi chip); the root disk is found automatically (no hardcoded `/dev/sda1`); killing a process sends SIGTERM first with an explicit force-kill option.
+- Container logs viewer; service descriptions and uptime; confirmations before stopping services that could cut off access.
+
+
 ### v2.0.0 — Security update
 - Two-factor authentication (TOTP) with replay protection
 - Brute-force protection: per-IP rate limits + escalating per-account lockout
@@ -258,7 +275,7 @@ paste the file, deploy, and add the route `your-domain.com/*`.
 
 ```bash
 cd backend && npm run dev          # API on :3000
-cd frontend && npx vite            # UI on :5173, proxies /api to :3000
+cd frontend && npx vite            # UI on :5173, proxies /api and /ws to :3000
 ```
 
 The repo includes [graphify](https://github.com/Graphify-Labs/graphify) settings (`.graphifyignore`, `CLAUDE.md`) for AI-assisted navigation. Optional:

@@ -3,10 +3,11 @@
   "short_name": "ServerCtrl",
   "description": "Self-hosted remote server manager",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0a0a0b",
-  "theme_color": "#0a0a0b",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10",
   "icons": [
-    { "src": "/skull.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+    { "src": "/skull.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]
 }
